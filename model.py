@@ -318,12 +318,12 @@ class Transformer(nn.Module):
     def _load_vocabs(self):
         if hasattr(self, '_vocabs_loaded'):
             return
-        ckpt = self._CHECKPOINT_NAME
-        if not os.path.exists(ckpt):
-            gdown.download(id=self._GDRIVE_FILE_ID, output=ckpt, quiet=False)
-        state = torch.load(ckpt, map_location="cpu")
-        self._src_stoi = state["src_vocab"]
-        self._tgt_itos = {i: t for t, i in state["tgt_vocab"].items()}
+        # Build vocab from the dataset directly — guaranteed to match
+        # since the model was trained on Multi30k with the same tokenizer
+        from dataset import Multi30kDataset
+        train_ds = Multi30kDataset(split='train')
+        self._src_stoi = train_ds.src_vocab.stoi
+        self._tgt_itos = {i: t for t, i in train_ds.tgt_vocab.stoi.items()}
         self._vocabs_loaded = True
 
     def infer(self, src_sentence: str) -> str:

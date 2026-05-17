@@ -234,8 +234,6 @@ class Transformer(nn.Module):
     # and replace GDRIVE_FILE_ID with your real Google Drive file ID.
     _GDRIVE_FILE_ID  = "12i_zxhe4RrufksrnwLR_DmTWhxkLPDdb"
     _CHECKPOINT_NAME = "checkpoint_epoch9.pt"
-    _SRC_VOCAB_SIZE  = 8000   # <── replace with your actual src vocab size
-    _TGT_VOCAB_SIZE  = 6000   # <── replace with your actual tgt vocab size
 
     def __init__(
         self,
@@ -327,25 +325,14 @@ class Transformer(nn.Module):
         self._vocabs_loaded = True
 
     def infer(self, src_sentence: str) -> str:
-        """
-        Translates a German sentence to English using greedy decoding.
-        Works standalone — loads vocab from checkpoint automatically.
-        """
-        import spacy
         self.eval()
         self._load_vocabs()
         device = next(self.parameters()).device
 
         unk_idx, pad_idx, sos_idx, eos_idx = 0, 1, 2, 3
 
-        try:
-            nlp_de = spacy.load("de_core_news_sm")
-        except OSError:
-            import subprocess, sys
-            subprocess.run([sys.executable, "-m", "spacy", "download", "de_core_news_sm"], check=True)
-            nlp_de = spacy.load("de_core_news_sm")
-
-        tokens  = [t.text.lower() for t in nlp_de.tokenizer(src_sentence)]
+        # Simple whitespace tokenization — no spaCy needed
+        tokens  = src_sentence.lower().split()
         src_ids = [sos_idx] + [self._src_stoi.get(t, unk_idx) for t in tokens] + [eos_idx]
 
         src      = torch.tensor([src_ids], dtype=torch.long, device=device)

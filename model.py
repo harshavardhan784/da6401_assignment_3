@@ -239,22 +239,29 @@ class Transformer(nn.Module):
 
     def __init__(
         self,
-        src_vocab_size: int   = None,   # defaults to _SRC_VOCAB_SIZE
-        tgt_vocab_size: int   = None,   # defaults to _TGT_VOCAB_SIZE
-        d_model:        int   = 256,
+        src_vocab_size: int   = None,
+        tgt_vocab_size: int   = None,
+        d_model:        int   = None,
         N:              int   = 3,
         num_heads:      int   = 8,
         d_ff:           int   = 512,
         dropout:        float = 0.1,
-        checkpoint_path: str  = None,   # if None, auto-downloads
+        checkpoint_path: str  = None,
     ) -> None:
         super().__init__()
 
-        # Use class-level defaults when called with no args (autograder path)
-        if src_vocab_size is None:
-            src_vocab_size = self._SRC_VOCAB_SIZE
-        if tgt_vocab_size is None:
-            tgt_vocab_size = self._TGT_VOCAB_SIZE
+        # ── Download checkpoint first so we can read shapes from it ──────
+        ckpt = checkpoint_path or self._CHECKPOINT_NAME
+        if not os.path.exists(ckpt):
+            gdown.download(id=self._GDRIVE_FILE_ID, output=ckpt, quiet=False)
+        state = torch.load(ckpt, map_location="cpu")
+        sd = state["model_state_dict"] if "model_state_dict" in state else state
+
+        # ── Infer vocab sizes and d_model directly from saved weights ────
+        # This means Transformer() with no args always matches the checkpoint
+        src_vocab_size = sd["src_embed.weight"].shape[0]
+        tgt_vocab_size = sd["tgt_embed.weight"].shape[0]
+        d_model        = sd["src_embed.weight"].shape[1]
 
         self.d_model        = d_model
         self.src_vocab_size = src_vocab_size
@@ -276,18 +283,7 @@ class Transformer(nn.Module):
         self.fc_out  = nn.Linear(d_model, tgt_vocab_size)
 
         self._init_weights()
-
-        # ── Load checkpoint ───────────────────────────────────────────
-        # Autograder calls Transformer() with no args, so we always
-        # download + load the checkpoint automatically.
-        ckpt = checkpoint_path or self._CHECKPOINT_NAME
-        if not os.path.exists(ckpt):
-            gdown.download(id=self._GDRIVE_FILE_ID, output=ckpt, quiet=False)
-        state = torch.load(ckpt, map_location="cpu")
-        # support both raw state_dict and save_checkpoint format
-        if "model_state_dict" in state:
-            state = state["model_state_dict"]
-        self.load_state_dict(state)
+        self.load_state_dict(sd)
 
     def _init_weights(self) -> None:
         for p in self.parameters():

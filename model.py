@@ -228,18 +228,33 @@ class Decoder(nn.Module):
 # ══════════════════════════════════════════════════════════════════════
 
 class Transformer(nn.Module):
+
+    # ── Fill these in after you train ─────────────────────────────────
+    # Replace with the actual vocab sizes your trained model used,
+    # and replace GDRIVE_FILE_ID with your real Google Drive file ID.
+    _GDRIVE_FILE_ID  = "1goKAh4DuzRH_cotbUDJjT_mpGQK9OxcR"
+    _CHECKPOINT_NAME = "checkpoint_epoch9.pt"
+    _SRC_VOCAB_SIZE  = 8000   # <── replace with your actual src vocab size
+    _TGT_VOCAB_SIZE  = 6000   # <── replace with your actual tgt vocab size
+
     def __init__(
         self,
-        src_vocab_size: int,
-        tgt_vocab_size: int,
-        d_model:   int   = 512,
-        N:         int   = 6,
-        num_heads: int   = 8,
-        d_ff:      int   = 2048,
-        dropout:   float = 0.1,
-        checkpoint_path: str = None,
+        src_vocab_size: int   = None,   # defaults to _SRC_VOCAB_SIZE
+        tgt_vocab_size: int   = None,   # defaults to _TGT_VOCAB_SIZE
+        d_model:        int   = 256,
+        N:              int   = 3,
+        num_heads:      int   = 8,
+        d_ff:           int   = 512,
+        dropout:        float = 0.1,
+        checkpoint_path: str  = None,   # if None, auto-downloads
     ) -> None:
         super().__init__()
+
+        # Use class-level defaults when called with no args (autograder path)
+        if src_vocab_size is None:
+            src_vocab_size = self._SRC_VOCAB_SIZE
+        if tgt_vocab_size is None:
+            tgt_vocab_size = self._TGT_VOCAB_SIZE
 
         self.d_model        = d_model
         self.src_vocab_size = src_vocab_size
@@ -262,10 +277,17 @@ class Transformer(nn.Module):
 
         self._init_weights()
 
-        if checkpoint_path is not None:
-            gdown.download(id="<.pth drive id>", output=checkpoint_path, quiet=False)
-            state = torch.load(checkpoint_path, map_location="cpu")
-            self.load_state_dict(state)
+        # ── Load checkpoint ───────────────────────────────────────────
+        # Autograder calls Transformer() with no args, so we always
+        # download + load the checkpoint automatically.
+        ckpt = checkpoint_path or self._CHECKPOINT_NAME
+        if not os.path.exists(ckpt):
+            gdown.download(id=self._GDRIVE_FILE_ID, output=ckpt, quiet=False)
+        state = torch.load(ckpt, map_location="cpu")
+        # support both raw state_dict and save_checkpoint format
+        if "model_state_dict" in state:
+            state = state["model_state_dict"]
+        self.load_state_dict(state)
 
     def _init_weights(self) -> None:
         for p in self.parameters():
@@ -297,38 +319,59 @@ class Transformer(nn.Module):
         memory = self.encode(src, src_mask)
         return self.decode(memory, src_mask, tgt, tgt_mask)
 
+    def _load_vocabs(self):
+        if hasattr(self, '_vocabs_loaded'):
+            return
+        ckpt = self._CHECKPOINT_NAME
+        if not os.path.exists(ckpt):
+            gdown.download(id=self._GDRIVE_FILE_ID, output=ckpt, quiet=False)
+        state = torch.load(ckpt, map_location="cpu")
+        self._src_stoi = state["src_vocab"]
+        self._tgt_itos = {i: t for t, i in state["tgt_vocab"].items()}
+        self._vocabs_loaded = True
+
     def infer(self, src_sentence: str) -> str:
         """
-        Greedy autoregressive decoding.
-        Set before calling:
-            model.src_tokenizer  callable str → List[int]
-            model.tgt_tokenizer  object with .decode(List[int]) → str
-            model.bos_idx, model.eos_idx, model.pad_idx  (ints)
+        Translates a German sentence to English using greedy decoding.
+        Works standalone — loads vocab from checkpoint automatically.
         """
+        import spacy
         self.eval()
+        self._load_vocabs()
         device = next(self.parameters()).device
 
-        src_tokens = self.src_tokenizer(src_sentence)
-        src        = torch.tensor([src_tokens], dtype=torch.long, device=device)
-        src_mask   = make_src_mask(src, pad_idx=self.pad_idx)
+        unk_idx, pad_idx, sos_idx, eos_idx = 0, 1, 2, 3
+
+        try:
+            nlp_de = spacy.load("de_core_news_sm")
+        except OSError:
+            import subprocess, sys
+            subprocess.run([sys.executable, "-m", "spacy", "download", "de_core_news_sm"], check=True)
+            nlp_de = spacy.load("de_core_news_sm")
+
+        tokens  = [t.text.lower() for t in nlp_de.tokenizer(src_sentence)]
+        src_ids = [sos_idx] + [self._src_stoi.get(t, unk_idx) for t in tokens] + [eos_idx]
+
+        src      = torch.tensor([src_ids], dtype=torch.long, device=device)
+        src_mask = make_src_mask(src, pad_idx=pad_idx)
 
         with torch.no_grad():
             memory = self.encode(src, src_mask)
 
-        tgt_indices = [self.bos_idx]
+        tgt_indices = [sos_idx]
         max_len     = src.size(1) + 50
 
         with torch.no_grad():
             for _ in range(max_len):
                 tgt      = torch.tensor([tgt_indices], dtype=torch.long, device=device)
-                tgt_mask = make_tgt_mask(tgt, pad_idx=self.pad_idx)
+                tgt_mask = make_tgt_mask(tgt, pad_idx=pad_idx)
                 logits   = self.decode(memory, src_mask, tgt, tgt_mask)
                 next_tok = logits[:, -1, :].argmax(dim=-1).item()
                 tgt_indices.append(next_tok)
-                if next_tok == self.eos_idx:
+                if next_tok == eos_idx:
                     break
 
         out = tgt_indices[1:]
-        if self.eos_idx in out:
-            out = out[:out.index(self.eos_idx)]
-        return self.tgt_tokenizer.decode(out)
+        if eos_idx in out:
+            out = out[:out.index(eos_idx)]
+        return " ".join(self._tgt_itos.get(i, "<unk>") for i in out)

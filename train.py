@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 from typing import Optional
 from tqdm import tqdm
 
-from nltk.translate.bleu_score import corpus_bleu
+from torchtext.data.metrics import bleu_score as torchtext_bleu
 
 from model import Transformer, make_src_mask, make_tgt_mask
 
@@ -240,7 +240,7 @@ def evaluate_bleu(
                 hypotheses.append(pred_tokens)
                 references.append([ref_tokens])   # torchtext expects list-of-lists
 
-    score = corpus_bleu(references, hypotheses) * 100.0
+    score = torchtext_bleu(hypotheses, references) * 100.0
     return score
 
 
@@ -255,12 +255,20 @@ def save_checkpoint(
     epoch: int,
     path: str = "checkpoint.pt",
 ) -> None:
+    # src_vocab and tgt_vocab must be set on the model before calling save_checkpoint:
+    #   model.src_vocab = train_ds.src_vocab   (Vocab object with .stoi dict)
+    #   model.tgt_vocab = train_ds.tgt_vocab
+    src_stoi = model.src_vocab.stoi if hasattr(model, 'src_vocab') else {}
+    tgt_stoi = model.tgt_vocab.stoi if hasattr(model, 'tgt_vocab') else {}
+
     torch.save(
         {
             'epoch': epoch,
             'model_state_dict':     model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
+            'src_vocab': src_stoi,   # token→idx, used by infer()
+            'tgt_vocab': tgt_stoi,   # token→idx, used by infer()
             'model_config': {
                 'src_vocab_size': model.src_vocab_size,
                 'tgt_vocab_size': model.tgt_vocab_size,
@@ -300,7 +308,7 @@ def load_checkpoint(
 def run_training_experiment() -> None:
     import wandb
     from dataset import Multi30kDataset, pad_idx
-    from lr_scheduler import NoamScheduler
+    from noam_lr_scheduler import NoamScheduler
 
     # ── Hyperparameters ───────────────────────────────────────────────
     config = dict(
@@ -347,6 +355,10 @@ def run_training_experiment() -> None:
         pad_idx    = pad_idx,
         smoothing  = cfg.smoothing,
     )
+
+    # Attach vocabs to model so save_checkpoint bundles them for infer()
+    model.src_vocab = src_vocab
+    model.tgt_vocab = tgt_vocab
 
     # ── Training loop ─────────────────────────────────────────────────
     for epoch in range(cfg.num_epochs):

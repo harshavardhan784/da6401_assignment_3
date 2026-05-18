@@ -337,14 +337,14 @@ def run_training_experiment() -> None:
     # ── Hyperparameters ───────────────────────────────────────────────
     config = dict(
         d_model      = 256,
-        N            = 3,
+        N            = 4,
         num_heads    = 8,
         d_ff         = 512,
-        dropout      = 0.1,
+        dropout      = 0.2,
         batch_size   = 128,
         num_epochs   = 20,
         warmup_steps = 4000,
-        smoothing    = 0.1,
+        smoothing    = 0.2,
         max_len      = 100,
     )
     device = "cuda" if torch.cuda.is_available() else "cpu"

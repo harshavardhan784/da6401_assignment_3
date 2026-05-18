@@ -236,7 +236,7 @@ class Transformer(nn.Module):
     # and replace GDRIVE_FILE_ID with your real Google Drive file ID.
     # _GDRIVE_FILE_ID  = "12i_zxhe4RrufksrnwLR_DmTWhxkLPDdb"
     # _GDRIVE_FILE_ID = "1ryFjU9OVf_VPyKsZx3zIeK7MdaHyM5P3" #19
-    _GDRIVE_FILE_ID = "1wgXqR9iswP3YjCecU_PCVR6_gbpcwk2g"
+    _GDRIVE_FILE_ID = "1ruv_ObfZUz_NZ_eKqhoOfmAzZ3xaGSR8"
     
     _CHECKPOINT_NAME = "checkpoint_epoch9.pt"
 

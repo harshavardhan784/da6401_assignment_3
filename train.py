@@ -1,3 +1,4 @@
+# train.py
 """
 train.py — Training Pipeline, Inference & Evaluation
 DA6401 Assignment 3: "Attention Is All You Need"
@@ -20,8 +21,9 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from typing import Optional
 from tqdm import tqdm
+import os
 
-from torchtext.data.metrics import bleu_score as torchtext_bleu
+from nltk.translate.bleu_score import corpus_bleu
 
 from model import Transformer, make_src_mask, make_tgt_mask
 
@@ -240,7 +242,8 @@ def evaluate_bleu(
                 hypotheses.append(pred_tokens)
                 references.append([ref_tokens])   # torchtext expects list-of-lists
 
-    score = torchtext_bleu(hypotheses, references) * 100.0
+    # score = torchtext_bleu(hypotheses, references) * 100.0
+    score = corpus_bleu(references, hypotheses)   # nltk: refs first, hyps second
     return score
 
 
@@ -308,7 +311,7 @@ def load_checkpoint(
 def run_training_experiment() -> None:
     import wandb
     from dataset import Multi30kDataset, pad_idx
-    from noam_lr_scheduler import NoamScheduler
+    from lr_scheduler import NoamScheduler
 
     # ── Hyperparameters ───────────────────────────────────────────────
     config = dict(
@@ -318,7 +321,7 @@ def run_training_experiment() -> None:
         d_ff         = 512,
         dropout      = 0.1,
         batch_size   = 128,
-        num_epochs   = 10,
+        num_epochs   = 20,
         warmup_steps = 4000,
         smoothing    = 0.1,
         max_len      = 100,
@@ -359,6 +362,10 @@ def run_training_experiment() -> None:
     # Attach vocabs to model so save_checkpoint bundles them for infer()
     model.src_vocab = src_vocab
     model.tgt_vocab = tgt_vocab
+    
+    ckpt_dir = "checkpoints"
+    os.makedirs(ckpt_dir, exist_ok=True)
+
 
     # ── Training loop ─────────────────────────────────────────────────
     for epoch in range(cfg.num_epochs):
@@ -372,7 +379,10 @@ def run_training_experiment() -> None:
         )
         print(f"Epoch {epoch:02d}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}")
         wandb.log({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
-        save_checkpoint(model, optimizer, scheduler, epoch, path=f"checkpoint_epoch{epoch}.pt")
+        save_checkpoint(
+            model, optimizer, scheduler, epoch,
+            path=f"{ckpt_dir}/checkpoint_epoch{epoch}.pt"
+        )
 
     # ── Final BLEU ────────────────────────────────────────────────────
     bleu = evaluate_bleu(model, test_loader, tgt_vocab, device=device, max_len=cfg.max_len)

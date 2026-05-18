@@ -1,3 +1,5 @@
+# model.py
+
 """
 model.py — Transformer Architecture Implementation
 DA6401 Assignment 3: "Attention Is All You Need"
@@ -239,27 +241,28 @@ class Transformer(nn.Module):
         self,
         src_vocab_size: int   = None,
         tgt_vocab_size: int   = None,
-        d_model:        int   = None,
+        d_model:        int   = 256,    # proper default now
         N:              int   = 3,
         num_heads:      int   = 8,
         d_ff:           int   = 512,
         dropout:        float = 0.1,
-        checkpoint_path: str  = None,
+        checkpoint_path: str  = None,   # None = training mode, no download
     ) -> None:
         super().__init__()
 
-        # ── Download checkpoint first so we can read shapes from it ──────
-        ckpt = checkpoint_path or self._CHECKPOINT_NAME
-        if not os.path.exists(ckpt):
-            gdown.download(id=self._GDRIVE_FILE_ID, output=ckpt, quiet=False)
-        state = torch.load(ckpt, map_location="cpu")
-        sd = state["model_state_dict"] if "model_state_dict" in state else state
-
-        # ── Infer vocab sizes and d_model directly from saved weights ────
-        # This means Transformer() with no args always matches the checkpoint
-        src_vocab_size = sd["src_embed.weight"].shape[0]
-        tgt_vocab_size = sd["tgt_embed.weight"].shape[0]
-        d_model        = sd["src_embed.weight"].shape[1]
+        # ── Inference mode: load everything from checkpoint ───────────
+        if checkpoint_path is None and src_vocab_size is None:
+            # autograder path: Transformer() with no args → download & load
+            ckpt = self._CHECKPOINT_NAME
+            if not os.path.exists(ckpt):
+                gdown.download(id=self._GDRIVE_FILE_ID, output=ckpt, quiet=False)
+            state = torch.load(ckpt, map_location="cpu")
+            sd = state["model_state_dict"] if "model_state_dict" in state else state
+            src_vocab_size = sd["src_embed.weight"].shape[0]
+            tgt_vocab_size = sd["tgt_embed.weight"].shape[0]
+            d_model        = sd["src_embed.weight"].shape[1]
+        else:
+            sd = None   # training mode, no checkpoint to load
 
         self.d_model        = d_model
         self.src_vocab_size = src_vocab_size
@@ -281,7 +284,9 @@ class Transformer(nn.Module):
         self.fc_out  = nn.Linear(d_model, tgt_vocab_size)
 
         self._init_weights()
-        self.load_state_dict(sd)
+
+        if sd is not None:
+            self.load_state_dict(sd)
 
     def _init_weights(self) -> None:
         for p in self.parameters():
@@ -358,3 +363,4 @@ class Transformer(nn.Module):
         if eos_idx in out:
             out = out[:out.index(eos_idx)]
         return " ".join(self._tgt_itos.get(i, "<unk>") for i in out)
+    

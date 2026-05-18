@@ -1,4 +1,8 @@
 # dataset.py
+"""
+dataset.py — Multi30k Dataset Loader
+DA6401 Assignment 3: "Attention Is All You Need"
+"""
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -10,7 +14,7 @@ import spacy
 from datasets import load_dataset
 
 
-# Special token constants
+# ── Special token constants ───────────────────────────────────────────
 unk_token = "<unk>"
 pad_token = "<pad>"
 sos_token = "<sos>"
@@ -25,7 +29,7 @@ specials = [unk_token, pad_token, sos_token, eos_token]
 
 
 class Vocab:
-    """Simple vocabulary: token <> index."""
+    """Simple vocabulary: token ↔ index."""
 
     def __init__(self, stoi: dict):
         self.stoi = stoi
@@ -42,16 +46,25 @@ class Vocab:
 
 
 class Multi30kDataset(Dataset):
-    def __init__(self, split: str = 'train', src_vocab=None, tgt_vocab=None):
-        """
-        Loads the Multi30k dataset and prepares tokenizers.
+    """
+    Multi30k German→English dataset.
 
-        Args:
-            split     : 'train', 'validation', or 'test'.
-            src_vocab : Pre-built source Vocab (pass from training split to val/test).
-            tgt_vocab : Pre-built target Vocab (pass from training split to val/test).
-        """
-        self.split = split
+    Args:
+        split      : 'train', 'validation', or 'test'.
+        src_vocab  : Pre-built source Vocab (pass from training split to val/test).
+        tgt_vocab  : Pre-built target Vocab (pass from training split to val/test).
+        min_freq   : Minimum token frequency to be included in vocab (training only).
+    """
+
+    def __init__(
+        self,
+        split:     str   = 'train',
+        src_vocab: Vocab = None,
+        tgt_vocab: Vocab = None,
+        min_freq:  int   = 1,
+    ):
+        self.split    = split
+        self.min_freq = min_freq
 
         raw       = load_dataset("bentrevett/multi30k")
         self.data = raw[split]
@@ -86,7 +99,9 @@ class Multi30kDataset(Dataset):
             tgt_counter.update(self.tokenize_en(example["en"]))
 
         def _build(counter: Counter) -> Vocab:
-            stoi = {tok: idx + len(specials) for idx, tok in enumerate(counter.keys())}
+            # Only keep tokens with freq >= min_freq; specials always included
+            filtered = [tok for tok, cnt in counter.items() if cnt >= self.min_freq]
+            stoi = {tok: idx + len(specials) for idx, tok in enumerate(filtered)}
             for idx, tok in enumerate(specials):
                 stoi[tok] = idx
             return Vocab(stoi)
@@ -131,9 +146,14 @@ class Multi30kDataset(Dataset):
     # ── DataLoader factory (call only on the training split) ──────────
 
     def get_dataloaders(self, batch_size: int = 128) -> tuple:
+        """
+        Build train / val / test DataLoaders.
+        Must be called on the training-split instance so vocabularies
+        are constructed from training data only.
+        """
         assert self.split == "train", (
             "get_dataloaders() must be called on the training split instance "
-            "so vocabularies are built on training data."
+            "so vocabularies are built on training data only."
         )
 
         val_ds = Multi30kDataset(

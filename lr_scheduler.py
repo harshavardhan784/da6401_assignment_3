@@ -1,5 +1,4 @@
-# lr scheduler.py
-
+# lr_scheduler.py
 """
 Noam Learning Rate Scheduler
 Reference: "Attention Is All You Need" (Vaswani et al., 2017)
@@ -18,12 +17,13 @@ class NoamScheduler(LRScheduler):
     """
     Noam learning rate scheduler as described in "Attention Is All You Need".
 
-    Applies a warm-up phase where LR increases linearly, followed by
-    a decay phase where LR decreases proportional to the inverse square
-    root of the step number.
+    Linear warm-up for `warmup_steps` steps, then inverse-square-root decay.
+
+    Formula:
+        lrate = d_model^(-0.5) * min(step^(-0.5), step * warmup_steps^(-1.5))
 
     Args:
-        optimizer    : Wrapped optimizer.
+        optimizer    : Wrapped optimizer (set lr=1.0 so base_lr acts as scale 1).
         d_model      : Model dimensionality (embedding size).
         warmup_steps : Number of warm-up steps before decay begins.
         last_epoch   : The index of the last epoch. Default: -1.
@@ -31,20 +31,22 @@ class NoamScheduler(LRScheduler):
 
     def __init__(
         self,
-        optimizer: optim.Optimizer,
-        d_model: int,
+        optimizer:    optim.Optimizer,
+        d_model:      int,
         warmup_steps: int,
-        last_epoch: int = -1,
+        last_epoch:   int = -1,
     ) -> None:
         self.d_model      = d_model
         self.warmup_steps = warmup_steps
         super().__init__(optimizer, last_epoch=last_epoch)
 
     def _get_lr_scale(self) -> float:
-        step  = max(1, self.last_epoch + 1)   # avoid step=0
+        # last_epoch starts at -1 and is incremented to 0 on the first
+        # scheduler.step() call, so effective step = last_epoch + 1.
+        step  = max(1, self.last_epoch + 1)
         scale = (self.d_model ** -0.5) * min(
             step ** -0.5,
-            step * (self.warmup_steps ** -1.5)
+            step * (self.warmup_steps ** -1.5),
         )
         return scale
 
@@ -54,14 +56,35 @@ class NoamScheduler(LRScheduler):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Helper — do NOT modify
+# Fixed-LR "scheduler" — used in Part-2 ablation 2.1
+# ──────────────────────────────────────────────────────────────────────
+
+class FixedLRScheduler(LRScheduler):
+    """
+    No-op scheduler: keeps the optimizer's learning rate constant.
+    Used in the Noam vs Fixed-LR ablation (Part 2.1).
+    """
+
+    def __init__(self, optimizer: optim.Optimizer, last_epoch: int = -1) -> None:
+        super().__init__(optimizer, last_epoch=last_epoch)
+
+    def get_lr(self) -> list:
+        return list(self.base_lrs)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Helper utilities
 # ──────────────────────────────────────────────────────────────────────
 
 def get_lr_history(
-    d_model: int,
+    d_model:      int,
     warmup_steps: int,
-    total_steps: int,
+    total_steps:  int,
 ) -> list:
+    """
+    Simulate the Noam schedule for `total_steps` steps and return the
+    per-step learning rate history.
+    """
     dummy_model = torch.nn.Linear(1, 1)
     optimizer   = optim.Adam(dummy_model.parameters(), lr=1.0)
     scheduler   = NoamScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
@@ -92,4 +115,5 @@ if __name__ == "__main__":
     plt.title(f"Noam LR Schedule  (d_model={D_MODEL})")
     plt.legend()
     plt.tight_layout()
+    plt.savefig("noam_lr_schedule.png", dpi=150)
     plt.show()

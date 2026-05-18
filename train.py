@@ -327,7 +327,7 @@ def run_training_experiment() -> None:
         max_len      = 100,
     )
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
+    print(device)
     wandb.init(project="da6401-a3", config=config)
     cfg = wandb.config
 

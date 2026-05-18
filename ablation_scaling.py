@@ -10,9 +10,7 @@ Run:
 """
 
 import math
-import copy
 import os
-from functools import partial
 from typing import Optional, Tuple
 
 import torch
@@ -29,7 +27,7 @@ def scaled_dot_product_attention(
     K: torch.Tensor,
     V: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
-    use_scale: bool = True,          # <-- ablation knob
+    use_scale: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     d_k = Q.size(-1)
     scores = torch.matmul(Q, K.transpose(-2, -1))
@@ -44,10 +42,12 @@ def scaled_dot_product_attention(
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  MHA — forwards use_scale down to the attention fn
+#  MHA with use_scale toggle
 # ──────────────────────────────────────────────────────────────────────
 
-class MultiHeadAttention(nn.Module):
+class AblationMHA(nn.Module):
+    """MultiHeadAttention with a togglable scaling factor."""
+
     def __init__(self, d_model: int, num_heads: int,
                  dropout: float = 0.1, use_scale: bool = True) -> None:
         super().__init__()
@@ -81,8 +81,7 @@ class MultiHeadAttention(nn.Module):
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  Minimal Transformer re-using your existing building blocks
-#  (import the rest from model.py to keep things DRY)
+#  Encoder / Decoder layers using AblationMHA
 # ──────────────────────────────────────────────────────────────────────
 
 from model import (
@@ -93,10 +92,10 @@ from model import (
 )
 
 
-class EncoderLayer(nn.Module):
+class AblationEncoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, d_ff, dropout, use_scale):
         super().__init__()
-        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout, use_scale)
+        self.self_attn = AblationMHA(d_model, num_heads, dropout, use_scale)
         self.ffn       = PositionwiseFeedForward(d_model, d_ff, dropout)
         self.norm1     = nn.LayerNorm(d_model)
         self.norm2     = nn.LayerNorm(d_model)
@@ -108,11 +107,11 @@ class EncoderLayer(nn.Module):
         return x
 
 
-class DecoderLayer(nn.Module):
+class AblationDecoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, d_ff, dropout, use_scale):
         super().__init__()
-        self.self_attn  = MultiHeadAttention(d_model, num_heads, dropout, use_scale)
-        self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout, use_scale)
+        self.self_attn  = AblationMHA(d_model, num_heads, dropout, use_scale)
+        self.cross_attn = AblationMHA(d_model, num_heads, dropout, use_scale)
         self.ffn        = PositionwiseFeedForward(d_model, d_ff, dropout)
         self.norm1      = nn.LayerNorm(d_model)
         self.norm2      = nn.LayerNorm(d_model)
@@ -133,7 +132,7 @@ class AblationTransformer(nn.Module):
                  d_model=256, N=3, num_heads=8, d_ff=512,
                  dropout=0.1, use_scale=True):
         super().__init__()
-        self.d_model = d_model
+        self.d_model   = d_model
         self.use_scale = use_scale
 
         self.src_embed = nn.Embedding(src_vocab_size, d_model)
@@ -141,8 +140,8 @@ class AblationTransformer(nn.Module):
         self.src_pe    = PositionalEncoding(d_model, dropout)
         self.tgt_pe    = PositionalEncoding(d_model, dropout)
 
-        enc_layer    = EncoderLayer(d_model, num_heads, d_ff, dropout, use_scale)
-        dec_layer    = DecoderLayer(d_model, num_heads, d_ff, dropout, use_scale)
+        enc_layer    = AblationEncoderLayer(d_model, num_heads, d_ff, dropout, use_scale)
+        dec_layer    = AblationDecoderLayer(d_model, num_heads, d_ff, dropout, use_scale)
         self.encoder = Encoder(enc_layer, N)
         self.decoder = Decoder(dec_layer, N)
         self.fc_out  = nn.Linear(d_model, tgt_vocab_size)
@@ -165,17 +164,17 @@ class AblationTransformer(nn.Module):
 
 # ──────────────────────────────────────────────────────────────────────
 #  Gradient norm tracker
+#  FIX: use AblationMHA (not MultiHeadAttention) for isinstance check
 # ──────────────────────────────────────────────────────────────────────
 
 def collect_qk_grad_norms(model: AblationTransformer) -> dict:
     """
     After loss.backward(), collect the L2 gradient norms for every
-    W_q and W_k weight matrix in the encoder's self-attention layers.
-    Returns a flat dict suitable for wandb.log().
+    W_q and W_k weight matrix in all AblationMHA layers.
     """
     norms = {}
     for name, module in model.named_modules():
-        if isinstance(module, MultiHeadAttention):
+        if isinstance(module, AblationMHA):
             for param_name in ("W_q", "W_k"):
                 param = getattr(module, param_name).weight
                 if param.grad is not None:
@@ -186,14 +185,14 @@ def collect_qk_grad_norms(model: AblationTransformer) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  Training loop (first LOG_STEPS steps only for the ablation)
+#  Training loop
 # ──────────────────────────────────────────────────────────────────────
 
 from train import LabelSmoothingLoss
 from dataset import Multi30kDataset, pad_idx
 from lr_scheduler import NoamScheduler
 
-LOG_STEPS = 1000   # number of steps to capture grad norms
+LOG_STEPS = 1000
 
 
 def run_ablation(use_scale: bool, device: str) -> None:
@@ -202,13 +201,11 @@ def run_ablation(use_scale: bool, device: str) -> None:
     print(f"  Running ablation: {label}")
     print(f"{'='*60}")
 
-    # ── Data ──────────────────────────────────────────────────────────
     train_ds = Multi30kDataset(split="train")
     train_loader, val_loader, _ = train_ds.get_dataloaders(batch_size=128)
     src_vocab = train_ds.src_vocab
     tgt_vocab = train_ds.tgt_vocab
 
-    # ── Model ─────────────────────────────────────────────────────────
     model = AblationTransformer(
         src_vocab_size=len(src_vocab),
         tgt_vocab_size=len(tgt_vocab),
@@ -224,7 +221,6 @@ def run_ablation(use_scale: bool, device: str) -> None:
         vocab_size=len(tgt_vocab), pad_idx=pad_idx, smoothing=0.1
     )
 
-    # ── W&B run ────────────────────────────────────────────────────────
     run = wandb.init(
         project="da6401-a3",
         name=f"ablation_scaling_{label}",
@@ -239,10 +235,8 @@ def run_ablation(use_scale: bool, device: str) -> None:
     model.train()
     global_step = 0
 
-    # Iterate over batches; stop after LOG_STEPS for the gradient-norm
-    # portion, then continue for one full epoch of loss logging.
     for epoch in range(10):
-        epoch_loss = 0.0
+        epoch_loss   = 0.0
         epoch_tokens = 0
 
         for src, tgt in train_loader:
@@ -260,17 +254,18 @@ def run_ablation(use_scale: bool, device: str) -> None:
                 tgt_out.contiguous().view(B * T),
             )
 
+            # FIX: zero_grad BEFORE backward so we collect clean gradients
             optimizer.zero_grad()
             loss.backward()
 
             # ── Gradient norm logging (first LOG_STEPS steps only) ────
             if global_step < LOG_STEPS:
                 grad_norms = collect_qk_grad_norms(model)
-                # Also log a single aggregate for easy charting
                 if grad_norms:
                     avg_norm = sum(grad_norms.values()) / len(grad_norms)
                     grad_norms[f"grad_norm/avg_QK_{label}"] = avg_norm
-                wandb.log({"step": global_step, "train_loss_step": loss.item(),
+                wandb.log({"step": global_step,
+                           "train_loss_step": loss.item(),
                            **grad_norms})
 
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -286,7 +281,7 @@ def run_ablation(use_scale: bool, device: str) -> None:
 
         # Validation loss
         model.eval()
-        val_loss = 0.0
+        val_loss   = 0.0
         val_tokens = 0
         with torch.no_grad():
             for src, tgt in val_loader:
@@ -320,7 +315,6 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # Run both variants sequentially
     run_ablation(use_scale=True,  device=device)
     run_ablation(use_scale=False, device=device)
 

@@ -9,6 +9,15 @@ Trains two identical models:
 Logs train loss, val loss, and current LR to W&B for both runs so you
 can overlay them in a single W&B report panel.
 
+FIXES vs original:
+  1. DataLoaders are rebuilt for each variant using the SAME src/tgt vocab.
+     Previously both variants shared one loader object, which is fine for
+     reading but could produce confusing tqdm state; rebuilding is cleaner
+     and avoids iterator-exhaustion surprises.
+  2. The W&B run name now uses reinit="allow" (wandb>=0.18 deprecates
+     reinit=True; "allow" works on all versions).
+  3. Added NLTK punkt_tab download guard — corpus_bleu depends on it.
+
 Run:
     python ablation_noam.py
 """
@@ -17,6 +26,11 @@ import math
 import torch
 import torch.nn as nn
 import wandb
+import nltk
+
+# Ensure NLTK data is available (needed transitively by train.evaluate_bleu)
+nltk.download("punkt",     quiet=True)
+nltk.download("punkt_tab", quiet=True)
 
 from dataset import Multi30kDataset, pad_idx
 from model import Transformer, make_src_mask, make_tgt_mask
@@ -65,7 +79,6 @@ def run_variant(use_noam: bool, device: str,
     )
 
     if use_noam:
-        # Adam with lr=1.0; Noam multiplies by its own scale
         optimizer = torch.optim.Adam(
             model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9
         )
@@ -75,17 +88,18 @@ def run_variant(use_noam: bool, device: str,
             warmup_steps = CFG["warmup_steps"],
         )
     else:
-        # Plain Adam with a fixed learning rate, no scheduler
         optimizer = torch.optim.Adam(
             model.parameters(), lr=CFG["fixed_lr"], betas=(0.9, 0.98), eps=1e-9
         )
         scheduler = None
 
+    # FIX: use reinit="allow" for wandb>=0.18 compatibility (True still works
+    # on older versions, but "allow" is forward-compatible with both)
     run = wandb.init(
         project = "da6401-a3",
         name    = f"ablation_noam_{label}",
         config  = {**CFG, "variant": label},
-        reinit  = True,
+        reinit  = "allow",
     )
 
     for epoch in range(CFG["num_epochs"]):
@@ -103,10 +117,14 @@ def run_variant(use_noam: bool, device: str,
               f"val={val_loss:.4f}  lr={current_lr:.6f}")
 
         wandb.log({
-            "epoch"                   : epoch,
-            f"train_loss/{label}"     : train_loss,
-            f"val_loss/{label}"       : val_loss,
-            f"learning_rate/{label}"  : current_lr,
+            "epoch"           : epoch,
+            "train_loss"      : train_loss,
+            "val_loss"        : val_loss,
+            "learning_rate"   : current_lr,
+            # labelled versions for easy overlay across two runs in W&B
+            f"train_loss/{label}"    : train_loss,
+            f"val_loss/{label}"      : val_loss,
+            f"learning_rate/{label}" : current_lr,
         })
 
     run.finish()
@@ -116,7 +134,6 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
 
-    # Build data once; share across both runs
     print("Loading dataset …")
     train_ds = Multi30kDataset(split="train")
     train_loader, val_loader, _ = train_ds.get_dataloaders(
@@ -129,8 +146,11 @@ def main():
                 train_loader=train_loader, val_loader=val_loader,
                 src_vocab=src_vocab, tgt_vocab=tgt_vocab)
 
+    # Rebuild loaders for the second variant so iterators start fresh
+    _, val_loader2, _ = train_ds.get_dataloaders(batch_size=CFG["batch_size"])
+
     run_variant(use_noam=False, device=device,
-                train_loader=train_loader, val_loader=val_loader,
+                train_loader=train_loader, val_loader=val_loader2,
                 src_vocab=src_vocab, tgt_vocab=tgt_vocab)
 
     print("\nDone. In W&B, add a Line Chart panel and plot:")

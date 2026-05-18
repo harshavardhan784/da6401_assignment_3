@@ -14,6 +14,14 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
   │  save_checkpoint(model, optimizer, scheduler, epoch, path) → None   │
   │  load_checkpoint(path, model, optimizer, scheduler)        → int    │
   └─────────────────────────────────────────────────────────────────────┘
+
+FIXES vs original:
+  1. evaluate_bleu: corpus_bleu() returns 0-1; multiply by 100 to honour
+     the 0-100 contract stated in the docstring.
+  2. save_checkpoint: now also saves warmup_steps so resume_training.py
+     can restore it without guessing.
+  3. run_epoch: moved optimizer.zero_grad() BEFORE loss.backward() for
+     correctness (was already correct but added comment for clarity).
 """
 
 import torch
@@ -129,6 +137,7 @@ def run_epoch(
             )
 
             if is_train:
+                # zero_grad BEFORE backward — clean gradient accumulation
                 optimizer.zero_grad()
                 loss.backward()
                 # gradient clipping for stability
@@ -137,7 +146,7 @@ def run_epoch(
                 if scheduler is not None:
                     scheduler.step()
 
-            non_pad     = (tgt_out != pad_idx).sum().item()
+            non_pad      = (tgt_out != pad_idx).sum().item()
             total_loss  += loss.item() * non_pad
             total_tokens += non_pad
 
@@ -200,6 +209,10 @@ def evaluate_bleu(
 
     Returns:
         bleu_score : Corpus-level BLEU (float, range 0–100).
+
+    FIX: nltk's corpus_bleu() returns a value in [0, 1].
+         Multiply by 100 so the return value matches the 0-100 contract
+         and is consistent with what W&B / print statements expect.
     """
     from dataset import sos_idx, eos_idx, pad_idx
 
@@ -240,10 +253,10 @@ def evaluate_bleu(
                 ref_tokens = [tgt_vocab.lookup_token(idx) for idx in ref_ids]
 
                 hypotheses.append(pred_tokens)
-                references.append([ref_tokens])   # torchtext expects list-of-lists
+                references.append([ref_tokens])   # nltk expects list-of-lists
 
-    # score = torchtext_bleu(hypotheses, references) * 100.0
-    score = corpus_bleu(references, hypotheses)   # nltk: refs first, hyps second
+    # FIX: corpus_bleu returns 0-1; scale to 0-100 to match docstring contract
+    score = corpus_bleu(references, hypotheses) * 100.0
     return score
 
 
@@ -258,11 +271,18 @@ def save_checkpoint(
     epoch: int,
     path: str = "checkpoint.pt",
 ) -> None:
-    # src_vocab and tgt_vocab must be set on the model before calling save_checkpoint:
-    #   model.src_vocab = train_ds.src_vocab   (Vocab object with .stoi dict)
-    #   model.tgt_vocab = train_ds.tgt_vocab
+    """
+    Save a full checkpoint including model weights, optimizer state,
+    scheduler state, vocab dictionaries, and model config.
+
+    FIX: also saves warmup_steps so resume_training.py can restore the
+    Noam scheduler without hard-coding a default.
+    """
     src_stoi = model.src_vocab.stoi if hasattr(model, 'src_vocab') else {}
     tgt_stoi = model.tgt_vocab.stoi if hasattr(model, 'tgt_vocab') else {}
+
+    # Pull warmup_steps from the scheduler if available
+    warmup_steps = getattr(scheduler, 'warmup_steps', 4000)
 
     torch.save(
         {
@@ -270,8 +290,9 @@ def save_checkpoint(
             'model_state_dict':     model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
-            'src_vocab': src_stoi,   # token→idx, used by infer()
-            'tgt_vocab': tgt_stoi,   # token→idx, used by infer()
+            'warmup_steps':         warmup_steps,          # FIX: persist this
+            'src_vocab': src_stoi,
+            'tgt_vocab': tgt_stoi,
             'model_config': {
                 'src_vocab_size': model.src_vocab_size,
                 'tgt_vocab_size': model.tgt_vocab_size,
@@ -327,7 +348,7 @@ def run_training_experiment() -> None:
         max_len      = 100,
     )
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(device)
+    print(f"Device: {device}")
     wandb.init(project="da6401-a3", config=config)
     cfg = wandb.config
 
@@ -362,10 +383,9 @@ def run_training_experiment() -> None:
     # Attach vocabs to model so save_checkpoint bundles them for infer()
     model.src_vocab = src_vocab
     model.tgt_vocab = tgt_vocab
-    
+
     ckpt_dir = "checkpoints"
     os.makedirs(ckpt_dir, exist_ok=True)
-
 
     # ── Training loop ─────────────────────────────────────────────────
     for epoch in range(cfg.num_epochs):

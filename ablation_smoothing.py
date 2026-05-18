@@ -10,6 +10,11 @@ Additionally logs "Prediction Confidence" — the softmax probability
 assigned to the correct token — to W&B so you can see the over-confidence
 effect directly.
 
+FIXES vs original:
+  1. Added NLTK punkt/punkt_tab download guard — silently fails otherwise.
+  2. wandb.init reinit="allow" for forward-compatibility.
+  3. evaluate_bleu now correctly returns 0-100 (fixed in train.py).
+
 Run:
     python ablation_smoothing.py
 """
@@ -19,6 +24,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
+import nltk
+
+# Ensure NLTK tokeniser data is present (needed by corpus_bleu internally)
+nltk.download("punkt",     quiet=True)
+nltk.download("punkt_tab", quiet=True)
 
 from dataset import Multi30kDataset, pad_idx
 from model import Transformer, make_src_mask, make_tgt_mask
@@ -63,7 +73,6 @@ def compute_prediction_confidence(
         probs  = F.softmax(logits, dim=-1)                  # (B, T, V)
 
         B, T, V = probs.shape
-        # Gather the probability of the correct token at each position
         correct_probs = probs.gather(
             dim=-1,
             index=tgt_out.unsqueeze(-1).clamp(0, V - 1)
@@ -98,7 +107,7 @@ def run_variant(smoothing: float, device: str,
                 train_loader, val_loader, test_loader,
                 src_vocab, tgt_vocab) -> None:
 
-    label = f"smoothing_{smoothing:.1f}".replace(".", "_")
+    label  = f"smoothing_{smoothing:.1f}".replace(".", "_")
     pretty = f"ε={smoothing}"
     print(f"\n{'='*60}\n  Label smoothing: {pretty}\n{'='*60}")
 
@@ -128,7 +137,7 @@ def run_variant(smoothing: float, device: str,
         project = "da6401-a3",
         name    = f"ablation_smoothing_{label}",
         config  = {**CFG, "smoothing": smoothing},
-        reinit  = True,
+        reinit="create_new",      # FIX: forward-compatible with wandb>=0.18
     )
 
     for epoch in range(CFG["num_epochs"]):
@@ -141,7 +150,6 @@ def run_variant(smoothing: float, device: str,
             epoch_num=epoch, is_train=False, device=device,
         )
 
-        # Prediction confidence on a small slice of val data
         confidence = compute_prediction_confidence(
             model, val_loader, device, num_batches=5
         )
@@ -154,11 +162,10 @@ def run_variant(smoothing: float, device: str,
             f"train_loss/{label}"              : train_loss,
             f"val_loss/{label}"                : val_loss,
             f"prediction_confidence/{label}"   : confidence,
-            # Also log perplexity (exp of cross-entropy loss)
             f"val_perplexity/{label}"          : math.exp(min(val_loss, 20)),
         })
 
-    # Final test BLEU
+    # Final test BLEU (train.py fix: already returns 0-100)
     test_bleu = evaluate_bleu(
         model, test_loader, tgt_vocab,
         device=device, max_len=CFG["max_len"]

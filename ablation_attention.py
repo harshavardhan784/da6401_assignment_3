@@ -13,26 +13,24 @@ Run:
 
 import argparse
 import math
-import copy
-from typing import Optional, Tuple, List
+from typing import Optional, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")          # headless – saves PNGs for W&B
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import wandb
 
 from model import (
     Transformer,
-    PositionalEncoding,
     PositionwiseFeedForward,
-    Encoder, Decoder,
-    make_src_mask, make_tgt_mask,
+    Encoder,
+    make_src_mask,
 )
-from dataset import Multi30kDataset, pad_idx, sos_idx, eos_idx
+from dataset import pad_idx, sos_idx, eos_idx
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -80,27 +78,8 @@ class InstrumentedMHA(nn.Module):
         K = self._split(self.W_k(key))
         V = self._split(self.W_v(value))
         out, weights = _sdpa_returning_weights(Q, K, V, mask)
-        self.last_attn_weights = weights.detach().cpu()   # cache
+        self.last_attn_weights = weights.detach().cpu()
         return self.W_o(self._merge(out))
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  Instrumented EncoderLayer — uses InstrumentedMHA
-# ══════════════════════════════════════════════════════════════════════
-
-class InstrumentedEncoderLayer(nn.Module):
-    def __init__(self, d_model, num_heads, d_ff, dropout):
-        super().__init__()
-        self.self_attn = InstrumentedMHA(d_model, num_heads, dropout)
-        self.ffn       = PositionwiseFeedForward(d_model, d_ff, dropout)
-        self.norm1     = nn.LayerNorm(d_model)
-        self.norm2     = nn.LayerNorm(d_model)
-        self.dropout   = nn.Dropout(p=dropout)
-
-    def forward(self, x, src_mask):
-        x = self.norm1(x + self.dropout(self.self_attn(x, x, x, src_mask)))
-        x = self.norm2(x + self.dropout(self.ffn(x)))
-        return x
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -111,6 +90,9 @@ def load_instrumented_model(ckpt_path: str, device: str):
     """
     Load weights from checkpoint and replace the LAST encoder layer's
     self-attention with InstrumentedMHA so we can read attention maps.
+
+    FIX: derive N from the actual state_dict key count instead of
+         hard-coding a default of 3, so this works for any checkpoint.
     """
     state = torch.load(ckpt_path, map_location="cpu")
     sd    = state.get("model_state_dict", state)
@@ -118,11 +100,17 @@ def load_instrumented_model(ckpt_path: str, device: str):
 
     src_vocab_size = sd["src_embed.weight"].shape[0]
     tgt_vocab_size = sd["tgt_embed.weight"].shape[0]
-    d_model   = cfg.get("d_model",    sd["src_embed.weight"].shape[1])
-    N         = cfg.get("N",          3)
-    num_heads = cfg.get("num_heads",  8)
-    d_ff      = cfg.get("d_ff",       512)
-    dropout   = cfg.get("dropout",    0.1)
+    d_model   = cfg.get("d_model", sd["src_embed.weight"].shape[1])
+    num_heads = cfg.get("num_heads", 8)
+    d_ff      = cfg.get("d_ff",     512)
+    dropout   = cfg.get("dropout",  0.1)
+
+    # FIX: derive N from the number of encoder layer keys in the state_dict
+    if "N" in cfg:
+        N = cfg["N"]
+    else:
+        N = sum(1 for k in sd if k.startswith("encoder.layers.") and k.endswith(".norm1.weight"))
+        N = max(N, 1)
 
     model = Transformer(
         src_vocab_size = src_vocab_size,
@@ -138,7 +126,6 @@ def load_instrumented_model(ckpt_path: str, device: str):
     # Swap the last encoder layer's self_attn with an instrumented one
     last_layer = model.encoder.layers[-1]
     instr = InstrumentedMHA(d_model, num_heads, dropout)
-    # Copy weights from the original W_q, W_k, W_v, W_o
     instr.W_q.weight.data = last_layer.self_attn.W_q.weight.data.clone()
     instr.W_q.bias.data   = last_layer.self_attn.W_q.bias.data.clone()
     instr.W_k.weight.data = last_layer.self_attn.W_k.weight.data.clone()
@@ -149,11 +136,11 @@ def load_instrumented_model(ckpt_path: str, device: str):
     instr.W_o.bias.data   = last_layer.self_attn.W_o.bias.data.clone()
     last_layer.self_attn  = instr
 
-    # Attach vocab look-up from checkpoint
-    src_stoi = state.get("src_vocab", {})
-    tgt_stoi = state.get("tgt_vocab", {})
-    model._src_stoi  = src_stoi
-    model._tgt_itos  = {i: t for t, i in tgt_stoi.items()}
+    # FIX: guard against missing vocab keys in old checkpoints
+    src_stoi = state.get("src_vocab") or {}
+    tgt_stoi = state.get("tgt_vocab") or {}
+    model._src_stoi      = src_stoi
+    model._tgt_itos      = {i: t for t, i in tgt_stoi.items()}
     model._vocabs_loaded = True
 
     model.to(device).eval()
@@ -195,7 +182,7 @@ def plot_head_heatmaps(
     for h in range(num_heads):
         r, c = divmod(h, cols)
         ax   = axes[r][c]
-        im   = ax.imshow(attn[h], vmin=0, vmax=attn[h].max(),
+        im   = ax.imshow(attn[h], vmin=0, vmax=max(attn[h].max(), 1e-6),
                          cmap="Blues", aspect="auto")
         ax.set_title(f"Head {h+1}", fontsize=9)
         ax.set_xticks(range(len(token_labels)))
@@ -204,7 +191,6 @@ def plot_head_heatmaps(
         ax.set_yticklabels(token_labels, fontsize=7)
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    # Hide unused axes
     for h in range(num_heads, rows * cols):
         r, c = divmod(h, cols)
         axes[r][c].set_visible(False)
@@ -220,23 +206,16 @@ def plot_head_heatmaps(
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  Head-specialization analysis (printed summary)
+#  Head-specialization analysis
 # ══════════════════════════════════════════════════════════════════════
 
 def analyze_heads(attn: np.ndarray, token_labels: List[str]) -> dict:
-    """
-    For each head compute:
-      - diagonal_score   : how much each token attends to itself
-      - next_token_score : how much each token attends to the next one
-      - entropy          : average attention entropy (low = sharp / specialized)
-    """
     results = {}
     S = len(token_labels)
     for h in range(attn.shape[0]):
-        A = attn[h]                                         # (S, S)
+        A = attn[h]
         diag  = float(np.mean(np.diag(A)))
         nxt   = float(np.mean([A[i, i+1] for i in range(S-1)])) if S > 1 else 0.0
-        # Shannon entropy per row, averaged
         ent   = float(-np.mean(np.sum(A * np.log(A + 1e-9), axis=-1)))
         results[h] = dict(diagonal=diag, next_token=nxt, entropy=ent)
         print(f"  Head {h+1:2d}  diag={diag:.3f}  next={nxt:.3f}  entropy={ent:.3f}")
@@ -247,7 +226,6 @@ def analyze_heads(attn: np.ndarray, token_labels: List[str]) -> dict:
 #  Main
 # ══════════════════════════════════════════════════════════════════════
 
-# A fixed German sentence from the Multi30k test set
 SAMPLE_DE = "ein mann mit einem orangefarbenen hut , der etwas anstarrt ."
 
 def main(ckpt_path: str):
@@ -261,12 +239,16 @@ def main(ckpt_path: str):
     print(f"\nSentence: {SAMPLE_DE}")
     print(f"Tokens  : {token_labels}")
 
-    # Forward pass — attention weights stored inside the instrumented layer
     with torch.no_grad():
         _ = model.encode(src, src_mask)
 
     attn_weights = model.encoder.layers[-1].self_attn.last_attn_weights
-    # attn_weights: (1, num_heads, S, S)
+    # FIX: guard against None (forward did not trigger instrumented layer)
+    if attn_weights is None:
+        raise RuntimeError(
+            "Attention weights were not captured. "
+            "Make sure the last encoder layer's self_attn was replaced correctly."
+        )
 
     run = wandb.init(
         project = "da6401-a3",
@@ -279,7 +261,6 @@ def main(ckpt_path: str):
     print(f"\nHead specialization (last encoder layer):")
     head_stats = analyze_heads(attn_weights[0].numpy(), token_labels)
 
-    # Log per-head scalar metrics
     for h, stats in head_stats.items():
         wandb.log({
             f"head_analysis/head{h+1}_diagonal"   : stats["diagonal"],
@@ -287,16 +268,14 @@ def main(ckpt_path: str):
             f"head_analysis/head{h+1}_entropy"    : stats["entropy"],
         })
 
-    # Log heatmap grid
     imgs = plot_head_heatmaps(attn_weights, token_labels, num_heads)
     wandb.log({"attention_heatmaps": imgs})
     print(f"\nHeatmap saved and logged to W&B.")
 
-    # Also log individual per-head images for drill-down
     attn_np = attn_weights[0].numpy()
     for h in range(num_heads):
         fig, ax = plt.subplots(figsize=(5, 4))
-        im = ax.imshow(attn_np[h], vmin=0, vmax=attn_np[h].max(),
+        im = ax.imshow(attn_np[h], vmin=0, vmax=max(attn_np[h].max(), 1e-6),
                        cmap="Blues", aspect="auto")
         ax.set_title(f"Head {h+1} — entropy={head_stats[h]['entropy']:.3f}")
         ax.set_xticks(range(len(token_labels)))

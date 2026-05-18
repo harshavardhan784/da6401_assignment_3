@@ -11,6 +11,7 @@ Compares validation BLEU after every epoch and logs to W&B.
 Run:
     python ablation_pe.py
 """
+print("STARTING SCRIPT")
 
 import math
 import torch
@@ -207,8 +208,7 @@ def run_variant(pe_type: str, device: str,
     wandb.log({f"test_bleu/{label}": test_bleu})
 
     run.finish()
-
-
+    
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")

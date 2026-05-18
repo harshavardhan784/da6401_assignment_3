@@ -234,7 +234,9 @@ class Transformer(nn.Module):
     # ── Fill these in after you train ─────────────────────────────────
     # Replace with the actual vocab sizes your trained model used,
     # and replace GDRIVE_FILE_ID with your real Google Drive file ID.
-    _GDRIVE_FILE_ID  = "12i_zxhe4RrufksrnwLR_DmTWhxkLPDdb"
+    # _GDRIVE_FILE_ID  = "12i_zxhe4RrufksrnwLR_DmTWhxkLPDdb"
+    _GDRIVE_FILE_ID = "1mZaWbl2vm6_qoN-FVTe4BYxu3jOi4kwo"
+    
     _CHECKPOINT_NAME = "checkpoint_epoch9.pt"
 
     def __init__(

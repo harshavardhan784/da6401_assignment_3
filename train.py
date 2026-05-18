@@ -332,7 +332,7 @@ def run_training_experiment() -> None:
     cfg = wandb.config
 
     # ── Data ──────────────────────────────────────────────────────────
-    train_ds                        = Multi30kDataset(split="train")
+    train_ds = Multi30kDataset(split="train")
     train_loader, val_loader, test_loader = train_ds.get_dataloaders(batch_size=cfg.batch_size)
     src_vocab = train_ds.src_vocab
     tgt_vocab = train_ds.tgt_vocab

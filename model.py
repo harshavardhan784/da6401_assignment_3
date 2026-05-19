@@ -12,6 +12,16 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
   │  Transformer.encode(src, src_mask)           → Tensor          │
   │  Transformer.decode(memory,src_m,tgt,tgt_m)  → Tensor          │
   └─────────────────────────────────────────────────────────────────┘
+
+CHANGES vs original:
+  - Transformer.__init__: checkpoint_path="NOT_AUTOGRADER" sentinel replaced
+    with a proper `training_mode` bool so no gdown call is made during training.
+  - Transformer.__init__: autograder path now safely handles missing
+    'model_config' key in older checkpoints.
+  - save_checkpoint / load_checkpoint logic lives in train.py; model only
+    needs to hold hyper-parameters — no change needed here.
+  - All ablation toggles (learned_pos_enc, use_scaling) are handled in
+    train.py / ablation_*.py, not in model.py — keeps autograder contract clean.
 """
 
 import math
@@ -199,6 +209,7 @@ class LearnedPositionalEncoding(nn.Module):
         super().__init__()
         self.dropout   = nn.Dropout(p=dropout)
         self.embedding = nn.Embedding(max_len, d_model)
+        nn.init.normal_(self.embedding.weight, mean=0, std=0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         seq_len = x.size(1)
@@ -235,6 +246,14 @@ class EncoderLayer(nn.Module):
     """
     Single Transformer encoder layer.
     Uses Pre-LayerNorm (norm before sub-layer) for training stability.
+
+    Justification for Pre-LN over Post-LN:
+      Post-LN is the original paper's formulation but is known to be
+      unstable at the start of training (gradients through the residual
+      path are un-normalised). Pre-LN (norm INSIDE the residual branch,
+      before the sub-layer) produces smoother gradient flow and converges
+      reliably without a careful LR warm-up ramp — a useful property
+      given the Multi30k dataset is small and over-fitting risk is high.
     """
 
     def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
@@ -338,13 +357,6 @@ def _infer_N_from_state_dict(sd: dict) -> int:
     return max_idx + 1 if max_idx >= 0 else 3
 
 
-def _infer_num_heads_from_state_dict(sd: dict, d_model: int) -> int:
-    """Infer num_heads from W_q weight shape. W_q: (d_model, d_model) → heads = d_model / d_k."""
-    # We can't directly get d_k from state_dict alone without more info,
-    # so fall back to a safe default of 8 (or read from config in checkpoint).
-    return 8
-
-
 def _infer_d_ff_from_state_dict(sd: dict) -> int:
     """Infer d_ff from the first FFN linear1 weight shape."""
     for k, v in sd.items():
@@ -357,13 +369,13 @@ class Transformer(nn.Module):
     """
     Full Transformer for sequence-to-sequence translation.
 
-    When called with no arguments (Transformer()), downloads the saved
-    checkpoint from Google Drive and reconstructs the exact architecture
-    that was trained — including the correct number of layers (N).
+    Training mode  : pass src_vocab_size and tgt_vocab_size explicitly.
+    Autograder mode: call Transformer() with no args — downloads checkpoint
+                     from Google Drive and reconstructs the exact architecture.
     """
 
     # ── Replace with your actual Google Drive file ID after training ──
-    _GDRIVE_FILE_ID  = "1lFE1VxzxMWaXlr8kiHHKJD_JnTdgP0RX"
+    _GDRIVE_FILE_ID  = "1mwISmk_ySNmwG18s-tP10AHK_rGjjJEa"
     _CHECKPOINT_NAME = "baseline_best.pt"
 
     def __init__(
@@ -371,40 +383,36 @@ class Transformer(nn.Module):
         src_vocab_size:   int   = None,
         tgt_vocab_size:   int   = None,
         d_model:          int   = 256,
-        N:                int   = 4,       # default matches training config
+        N:                int   = 4,
         num_heads:        int   = 8,
         d_ff:             int   = 512,
         dropout:          float = 0.1,
         learned_pos_enc:  bool  = False,   # Part-2 ablation 2.4
-        checkpoint_path:  str   = None,    # None = autograder path (download)
+        # FIX: use a proper bool flag instead of a sentinel string.
+        # Pass training_mode=True when constructing for training so no
+        # checkpoint download is triggered.
+        training_mode:    bool  = False,
+        checkpoint_path:  str   = None,    # explicit path to load weights from
     ) -> None:
         super().__init__()
 
-        # ── Inference / autograder path: Transformer() with no args ──
-        if checkpoint_path is None and src_vocab_size is None:
-            ckpt_path = self._CHECKPOINT_NAME
+        # ── Autograder / inference path: Transformer() with no args ──
+        if not training_mode and src_vocab_size is None:
+            ckpt_path = checkpoint_path if checkpoint_path else self._CHECKPOINT_NAME
             if not os.path.exists(ckpt_path):
                 gdown.download(id=self._GDRIVE_FILE_ID, output=ckpt_path, quiet=False)
             state = torch.load(ckpt_path, map_location="cpu")
             sd = state["model_state_dict"] if "model_state_dict" in state else state
+            cfg = state.get("model_config", {})
 
-            # ── Read all architecture dims from the checkpoint itself ──
-            src_vocab_size = sd["src_embed.weight"].shape[0]
-            tgt_vocab_size = sd["tgt_embed.weight"].shape[0]
-            d_model        = sd["src_embed.weight"].shape[1]
-            N              = _infer_N_from_state_dict(sd)
-            d_ff           = _infer_d_ff_from_state_dict(sd)
-
-            # num_heads: read from saved config if available, else infer
-            if "model_config" in state and "num_heads" in state["model_config"]:
-                num_heads = state["model_config"]["num_heads"]
-            else:
-                num_heads = _infer_num_heads_from_state_dict(sd, d_model)
-
-            # learned_pos_enc: read from saved config if available
-            if "model_config" in state:
-                learned_pos_enc = state["model_config"].get("learned_pos_enc", False)
-
+            # Read all architecture dims from the checkpoint itself
+            src_vocab_size  = sd["src_embed.weight"].shape[0]
+            tgt_vocab_size  = sd["tgt_embed.weight"].shape[0]
+            d_model         = cfg.get("d_model", sd["src_embed.weight"].shape[1])
+            N               = cfg.get("N", _infer_N_from_state_dict(sd))
+            d_ff            = cfg.get("d_ff", _infer_d_ff_from_state_dict(sd))
+            num_heads       = cfg.get("num_heads", 8)
+            learned_pos_enc = cfg.get("learned_pos_enc", False)
         else:
             sd = None  # training mode — no checkpoint to load yet
 
@@ -483,8 +491,9 @@ class Transformer(nn.Module):
         if not os.path.exists(ckpt_path):
             gdown.download(id=self._GDRIVE_FILE_ID, output=ckpt_path, quiet=False)
         state = torch.load(ckpt_path, map_location="cpu")
-        self._src_stoi = state["src_vocab"]
-        self._tgt_itos = {i: t for t, i in state["tgt_vocab"].items()}
+        self._src_stoi = state.get("src_vocab", {})
+        tgt_stoi = state.get("tgt_vocab", {})
+        self._tgt_itos = {i: t for t, i in tgt_stoi.items()}
         self._vocabs_loaded = True
 
     # ── Autograder inference entry point ─────────────────────────────

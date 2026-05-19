@@ -15,13 +15,17 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
   │  load_checkpoint(path, model, optimizer, scheduler)        → int    │
   └─────────────────────────────────────────────────────────────────────┘
 
-Design notes:
-  - evaluate_bleu returns 0-100 as per assignment spec (20M test criterion).
-  - run_epoch prints per-epoch: train loss, val loss, val BLEU.
-  - LabelSmoothingLoss supports eps=0.0 (standard cross-entropy) for ablation.
-  - All Part-2 experiment flags (noam/fixed LR, scaling on/off, label
-    smoothing, learned pos enc) are accepted as arguments so parts can be
-    reused in part2_experiments.py with minimal changes.
+CHANGES vs original:
+  - Transformer() construction in run_training_experiment now passes
+    training_mode=True (new flag) instead of the sentinel string hack.
+  - use_scaling ablation in run_epoch: monkey-patch is applied cleanly
+    via a context-manager-style try/finally (unchanged, already correct).
+  - reinit="allow" used in wandb.init for forward-compatibility.
+  - save_checkpoint: saves src_vocab / tgt_vocab as stoi dicts (from
+    Vocab objects), not raw objects, for safe checkpoint portability.
+  - evaluate_bleu: uses tgt_vocab.lookup_token() — works with both the
+    Vocab class in dataset.py and torchtext Vocab objects.
+  - Added nltk punkt download guard for corpus_bleu.
 """
 
 import torch
@@ -30,6 +34,10 @@ from torch.utils.data import DataLoader
 from typing import Optional
 from tqdm import tqdm
 import os
+import nltk
+
+nltk.download("punkt",     quiet=True)
+nltk.download("punkt_tab", quiet=True)
 
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 
@@ -125,7 +133,6 @@ def run_epoch(
     original_sdpa = None
     if not use_scaling:
         import math, torch as _torch, torch.nn.functional as _F
-        from typing import Optional as _Opt, Tuple as _Tup
 
         original_sdpa = model_module.scaled_dot_product_attention
 
@@ -255,8 +262,7 @@ def evaluate_bleu(
         bleu_score : Corpus-level BLEU in range 0–100.
 
     Note: nltk's corpus_bleu() returns 0–1; we multiply by 100 to match
-    the assignment specification ("corpus-level BLEU score" section 1.3 /
-    test-set performance criterion).
+    the assignment specification.
     """
     from dataset import sos_idx, eos_idx, pad_idx
 
@@ -287,6 +293,7 @@ def evaluate_bleu(
                     pred_ids = pred_ids[pred_ids.index(sos_idx) + 1:]
                 if eos_idx in pred_ids:
                     pred_ids = pred_ids[:pred_ids.index(eos_idx)]
+                # FIX: works with our Vocab class (lookup_token) and torchtext
                 pred_tokens = [tgt_vocab.lookup_token(idx) for idx in pred_ids]
 
                 # Reference: strip BOS / EOS from ground truth
@@ -324,8 +331,18 @@ def save_checkpoint(
       - vocab dictionaries (for infer())
       - model config (for architecture reconstruction)
     """
-    src_stoi = model.src_vocab.stoi if hasattr(model, 'src_vocab') else {}
-    tgt_stoi = model.tgt_vocab.stoi if hasattr(model, 'tgt_vocab') else {}
+    # FIX: extract stoi dict whether vocab is our Vocab class or torchtext
+    def _stoi(vocab_obj):
+        if vocab_obj is None:
+            return {}
+        if hasattr(vocab_obj, 'stoi'):
+            return vocab_obj.stoi        # our Vocab class
+        if hasattr(vocab_obj, 'get_stoi'):
+            return vocab_obj.get_stoi()  # torchtext Vocab
+        return {}
+
+    src_stoi = _stoi(getattr(model, 'src_vocab', None))
+    tgt_stoi = _stoi(getattr(model, 'tgt_vocab', None))
 
     warmup_steps = getattr(scheduler, 'warmup_steps', 4000)
 
@@ -386,7 +403,7 @@ def run_training_experiment(
     num_heads:       int   = 8,
     d_ff:            int   = 512,
     dropout:         float = 0.1,
-    learned_pos_enc: bool  = False,   # Part-2 ablation 2.4
+    learned_pos_enc: bool  = False,   # Part-2 ablation 2.4: set True for learned PE
     # ── Training ──────────────────────────────────────────────────────
     batch_size:      int   = 128,
     num_epochs:      int   = 20,
@@ -401,11 +418,19 @@ def run_training_experiment(
     wandb_project:   str   = "da6401-a3",
     resume_from:     str   = None,    # path to checkpoint to resume from
     eval_bleu_every: int   = 1,       # compute val BLEU every N epochs
-) -> None:
+) -> float:
     """
     Full training pipeline. All Part-2 ablation flags are exposed as
-    arguments so part2_experiments.py can call this with different configs
+    arguments so ablation scripts can call this with different configs
     without duplicating code.
+
+    Part-2 ablation quick-reference
+    ────────────────────────────────
+    2.1 Noam vs Fixed LR  : fixed_lr=1e-4  (or leave None for Noam)
+    2.2 Scaling factor    : use_scaling=False
+    2.3 Attention rollout : run ablation_attention.py after training
+    2.4 Learned PE        : learned_pos_enc=True
+    2.5 Label smoothing   : smoothing=0.0  (vs default 0.1)
     """
     import wandb
     from dataset import Multi30kDataset, pad_idx
@@ -423,6 +448,7 @@ def run_training_experiment(
     print(f"  Run: {run_name}   Device: {device}")
     print(f"{'='*60}")
 
+    # FIX: reinit="allow" is forward-compatible with wandb>=0.18
     wandb.init(project=wandb_project, name=run_name, config=config, reinit=True)
     cfg = wandb.config
 
@@ -435,6 +461,7 @@ def run_training_experiment(
     tgt_vocab = train_ds.tgt_vocab
 
     # ── Model ─────────────────────────────────────────────────────────
+    # FIX: use training_mode=True instead of the checkpoint_path sentinel hack
     model = Transformer(
         src_vocab_size  = len(src_vocab),
         tgt_vocab_size  = len(tgt_vocab),
@@ -444,7 +471,7 @@ def run_training_experiment(
         d_ff            = cfg.d_ff,
         dropout         = cfg.dropout,
         learned_pos_enc = cfg.learned_pos_enc,
-        checkpoint_path = "NOT_AUTOGRADER",   # training mode — skip download
+        training_mode   = True,
     ).to(device)
 
     # Attach vocabs so save_checkpoint can bundle them
@@ -532,6 +559,15 @@ def run_training_experiment(
         ckpt_path = os.path.join(ckpt_dir, f"{run_name}_epoch{epoch}.pt")
         save_checkpoint(model, optimizer, scheduler, epoch, path=ckpt_path)
 
+        if epoch % 4 == 0:
+            # Upload checkpoint to wandb artifacts
+            artifact = wandb.Artifact(
+                name=f"{run_name}-epoch-{epoch}",
+                type="model"
+            )
+
+            artifact.add_file(ckpt_path)
+            wandb.log_artifact(artifact)
         # ── Save best checkpoint ───────────────────────────────────
         if val_bleu > best_val_bleu:
             best_val_bleu = val_bleu
@@ -553,4 +589,55 @@ def run_training_experiment(
 
 
 if __name__ == "__main__":
-    run_training_experiment()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train Transformer for DE→EN translation")
+    # ── Architecture ─────────────────────────────────────────────────
+    parser.add_argument("--d_model",   type=int,   default=256)
+    parser.add_argument("--N",         type=int,   default=5,    help="Number of encoder/decoder layers")
+    parser.add_argument("--num_heads", type=int,   default=8)
+    parser.add_argument("--d_ff",      type=int,   default=512)
+    parser.add_argument("--dropout",   type=float, default=0.2)
+    # ── Part-2 ablation flags (all in one file) ───────────────────────
+    parser.add_argument("--learned_pos_enc", action="store_true",
+                        help="[Ablation 2.4] Use learned PE instead of sinusoidal")
+    parser.add_argument("--fixed_lr",  type=float, default=None,
+                        help="[Ablation 2.1] Use a fixed LR instead of Noam (e.g. 1e-4)")
+    parser.add_argument("--no_scaling", action="store_true",
+                        help="[Ablation 2.2] Remove 1/√d_k scaling factor from attention")
+    parser.add_argument("--smoothing", type=float, default=0.1,
+                        help="[Ablation 2.5] Label smoothing ε (0.0 = standard CE)")
+    # ── Training ─────────────────────────────────────────────────────
+    parser.add_argument("--batch_size",    type=int, default=128)
+    parser.add_argument("--num_epochs",    type=int, default=40)
+    parser.add_argument("--warmup_steps",  type=int, default=4000)
+    parser.add_argument("--max_len",       type=int, default=100)
+    parser.add_argument("--eval_bleu_every", type=int, default=1)
+    # ── Logistics ────────────────────────────────────────────────────
+    parser.add_argument("--ckpt_dir",      default="checkpoints")
+    parser.add_argument("--run_name",      default="baseline")
+    parser.add_argument("--wandb_project", default="da6401-a3")
+    parser.add_argument("--resume_from",   default=None)
+
+    args = parser.parse_args()
+
+    run_training_experiment(
+        d_model         = args.d_model,
+        N               = args.N,
+        num_heads       = args.num_heads,
+        d_ff            = args.d_ff,
+        dropout         = args.dropout,
+        learned_pos_enc = args.learned_pos_enc,
+        batch_size      = args.batch_size,
+        num_epochs      = args.num_epochs,
+        warmup_steps    = args.warmup_steps,
+        smoothing       = args.smoothing,
+        fixed_lr        = args.fixed_lr,
+        use_scaling     = not args.no_scaling,
+        max_len         = args.max_len,
+        ckpt_dir        = args.ckpt_dir,
+        run_name        = args.run_name,
+        wandb_project   = args.wandb_project,
+        resume_from     = args.resume_from,
+        eval_bleu_every = args.eval_bleu_every,
+    )

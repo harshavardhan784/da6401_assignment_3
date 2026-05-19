@@ -10,10 +10,8 @@ Additionally logs "Prediction Confidence" — the softmax probability
 assigned to the correct token — to W&B so you can see the over-confidence
 effect directly.
 
-FIXES vs original:
-  1. Added NLTK punkt/punkt_tab download guard — silently fails otherwise.
-  2. wandb.init reinit="allow" for forward-compatibility.
-  3. evaluate_bleu now correctly returns 0-100 (fixed in train.py).
+NOTE: Training is delegated to run_training_experiment() in train.py.
+      The confidence metric requires a small custom eval pass done here.
 
 Run:
     python ablation_smoothing.py
@@ -21,18 +19,19 @@ Run:
 
 import math
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 import nltk
 
-# Ensure NLTK tokeniser data is present (needed by corpus_bleu internally)
 nltk.download("punkt",     quiet=True)
 nltk.download("punkt_tab", quiet=True)
 
 from dataset import Multi30kDataset, pad_idx
 from model import Transformer, make_src_mask, make_tgt_mask
-from train import LabelSmoothingLoss, run_epoch, evaluate_bleu
+from train import (
+    LabelSmoothingLoss, run_epoch, evaluate_bleu,
+    save_checkpoint, load_checkpoint,
+)
 from lr_scheduler import NoamScheduler
 
 
@@ -119,6 +118,7 @@ def run_variant(smoothing: float, device: str,
         num_heads = CFG["num_heads"],
         d_ff      = CFG["d_ff"],
         dropout   = CFG["dropout"],
+        training_mode = True,
     ).to(device)
 
     optimizer = torch.optim.Adam(
@@ -133,11 +133,12 @@ def run_variant(smoothing: float, device: str,
         smoothing  = smoothing,
     )
 
+    # FIX: reinit="allow" is forward-compatible with wandb>=0.18
     run = wandb.init(
         project = "da6401-a3",
         name    = f"ablation_smoothing_{label}",
         config  = {**CFG, "smoothing": smoothing},
-        reinit="create_new",      # FIX: forward-compatible with wandb>=0.18
+        reinit  = "allow",
     )
 
     for epoch in range(CFG["num_epochs"]):
@@ -165,7 +166,7 @@ def run_variant(smoothing: float, device: str,
             f"val_perplexity/{label}"          : math.exp(min(val_loss, 20)),
         })
 
-    # Final test BLEU (train.py fix: already returns 0-100)
+    # Final test BLEU
     test_bleu = evaluate_bleu(
         model, test_loader, tgt_vocab,
         device=device, max_len=CFG["max_len"]

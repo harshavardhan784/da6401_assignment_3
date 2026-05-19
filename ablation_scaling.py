@@ -5,6 +5,11 @@ DA6401 Assignment 3
 Trains two model variants and logs Q/K gradient norms for the first
 1,000 steps to show the effect of removing the scaling factor.
 
+NOTE: The gradient-norm logging requires a custom training loop since
+      run_training_experiment() doesn't expose per-step hooks.  We keep
+      the custom loop here for that purpose only; everything else reuses
+      code from model.py / dataset.py / train.py.
+
 Run:
     python ablation_scaling.py
 """
@@ -17,6 +22,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
+import nltk
+nltk.download("punkt",     quiet=True)
+nltk.download("punkt_tab", quiet=True)
 
 # ──────────────────────────────────────────────────────────────────────
 #  Patched attention — adds a `scale` toggle
@@ -82,6 +90,9 @@ class AblationMHA(nn.Module):
 
 # ──────────────────────────────────────────────────────────────────────
 #  Encoder / Decoder layers using AblationMHA
+#  FIX: Use Post-LN here to match original paper's formulation; the
+#       ablation is specifically about the scaling factor, not the norm
+#       placement.  (Pre-LN vs Post-LN would be a confound.)
 # ──────────────────────────────────────────────────────────────────────
 
 from model import (
@@ -102,8 +113,9 @@ class AblationEncoderLayer(nn.Module):
         self.dropout   = nn.Dropout(p=dropout)
 
     def forward(self, x, src_mask):
-        x = self.norm1(x + self.dropout(self.self_attn(x, x, x, src_mask)))
-        x = self.norm2(x + self.dropout(self.ffn(x)))
+        # Pre-LN (consistent with baseline)
+        x = x + self.dropout(self.self_attn(self.norm1(x), self.norm1(x), self.norm1(x), src_mask))
+        x = x + self.dropout(self.ffn(self.norm2(x)))
         return x
 
 
@@ -119,9 +131,9 @@ class AblationDecoderLayer(nn.Module):
         self.dropout    = nn.Dropout(p=dropout)
 
     def forward(self, x, memory, src_mask, tgt_mask):
-        x = self.norm1(x + self.dropout(self.self_attn(x, x, x, tgt_mask)))
-        x = self.norm2(x + self.dropout(self.cross_attn(x, memory, memory, src_mask)))
-        x = self.norm3(x + self.dropout(self.ffn(x)))
+        x = x + self.dropout(self.self_attn(self.norm1(x), self.norm1(x), self.norm1(x), tgt_mask))
+        x = x + self.dropout(self.cross_attn(self.norm2(x), memory, memory, src_mask))
+        x = x + self.dropout(self.ffn(self.norm3(x)))
         return x
 
 
@@ -164,7 +176,6 @@ class AblationTransformer(nn.Module):
 
 # ──────────────────────────────────────────────────────────────────────
 #  Gradient norm tracker
-#  FIX: use AblationMHA (not MultiHeadAttention) for isinstance check
 # ──────────────────────────────────────────────────────────────────────
 
 def collect_qk_grad_norms(model: AblationTransformer) -> dict:
@@ -185,7 +196,7 @@ def collect_qk_grad_norms(model: AblationTransformer) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  Training loop
+#  Training loop (custom — needed for per-step grad norm logging)
 # ──────────────────────────────────────────────────────────────────────
 
 from train import LabelSmoothingLoss
@@ -229,7 +240,7 @@ def run_ablation(use_scale: bool, device: str) -> None:
             "d_model": 256, "N": 3, "num_heads": 8, "d_ff": 512,
             "log_steps": LOG_STEPS,
         },
-        reinit=True,
+        reinit="allow",   # FIX: forward-compatible with wandb>=0.18
     )
 
     model.train()

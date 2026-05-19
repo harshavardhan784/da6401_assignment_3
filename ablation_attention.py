@@ -8,7 +8,7 @@ Logs one heatmap per head to W&B and prints a brief head-specialization
 analysis.
 
 Run:
-    python ablation_attention.py --ckpt checkpoints/checkpoint_epoch9.pt
+    python ablation_attention.py --ckpt checkpoints/baseline_best.pt
 """
 
 import argparse
@@ -90,9 +90,6 @@ def load_instrumented_model(ckpt_path: str, device: str):
     """
     Load weights from checkpoint and replace the LAST encoder layer's
     self-attention with InstrumentedMHA so we can read attention maps.
-
-    FIX: derive N from the actual state_dict key count instead of
-         hard-coding a default of 3, so this works for any checkpoint.
     """
     state = torch.load(ckpt_path, map_location="cpu")
     sd    = state.get("model_state_dict", state)
@@ -105,13 +102,14 @@ def load_instrumented_model(ckpt_path: str, device: str):
     d_ff      = cfg.get("d_ff",     512)
     dropout   = cfg.get("dropout",  0.1)
 
-    # FIX: derive N from the number of encoder layer keys in the state_dict
+    # Derive N from the number of encoder layer keys in the state_dict
     if "N" in cfg:
         N = cfg["N"]
     else:
         N = sum(1 for k in sd if k.startswith("encoder.layers.") and k.endswith(".norm1.weight"))
         N = max(N, 1)
 
+    # FIX: use training_mode=True to avoid gdown download during construction
     model = Transformer(
         src_vocab_size = src_vocab_size,
         tgt_vocab_size = tgt_vocab_size,
@@ -120,6 +118,7 @@ def load_instrumented_model(ckpt_path: str, device: str):
         num_heads      = num_heads,
         d_ff           = d_ff,
         dropout        = dropout,
+        training_mode  = True,
     )
     model.load_state_dict(sd)
 
@@ -136,7 +135,7 @@ def load_instrumented_model(ckpt_path: str, device: str):
     instr.W_o.bias.data   = last_layer.self_attn.W_o.bias.data.clone()
     last_layer.self_attn  = instr
 
-    # FIX: guard against missing vocab keys in old checkpoints
+    # Guard against missing vocab keys in old checkpoints
     src_stoi = state.get("src_vocab") or {}
     tgt_stoi = state.get("tgt_vocab") or {}
     model._src_stoi      = src_stoi
@@ -243,7 +242,6 @@ def main(ckpt_path: str):
         _ = model.encode(src, src_mask)
 
     attn_weights = model.encoder.layers[-1].self_attn.last_attn_weights
-    # FIX: guard against None (forward did not trigger instrumented layer)
     if attn_weights is None:
         raise RuntimeError(
             "Attention weights were not captured. "
@@ -255,7 +253,7 @@ def main(ckpt_path: str):
         name    = "ablation_attention_heads",
         config  = {"d_model": d_model, "num_heads": num_heads,
                    "sentence": SAMPLE_DE},
-        reinit  = True,
+        reinit  = "allow",
     )
 
     print(f"\nHead specialization (last encoder layer):")
@@ -297,7 +295,7 @@ def main(ckpt_path: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--ckpt", default="checkpoints/checkpoint_epoch19.pt",
+        "--ckpt", default="checkpoints/baseline_best.pt",
         help="Path to your best saved checkpoint"
     )
     args = parser.parse_args()

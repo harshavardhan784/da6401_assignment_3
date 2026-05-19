@@ -13,17 +13,6 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
   │  Transformer.encode(src, src_mask)           → Tensor          │
   │  Transformer.decode(memory,src_m,tgt,tgt_m)  → Tensor          │
   └─────────────────────────────────────────────────────────────────┘
-
-Ablation flags:
-  use_scale     : bool  — ablation 2.2 (with/without √dk scaling)
-  pos_encoding  : str   — ablation 2.4 ('sinusoidal' | 'learned')
-
-Changes vs submitted:
-  1. FIX: EncoderLayer/DecoderLayer called self.norm1(x) twice for Q and K
-     in self-attention — now computed once and stored in a local variable.
-  2. FIX: attn_weights stored on MultiHeadAttention for 2.2/2.3 extraction.
-  3. LearnedPositionalEncoding added for ablation 2.4.
-  4. Transformer stores pos_encoding and use_scale for save_checkpoint.
 """
 
 import math
@@ -37,9 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ══════════════════════════════════════════════════════════════════════
 #  SCALED DOT-PRODUCT ATTENTION
-# ══════════════════════════════════════════════════════════════════════
 
 def scaled_dot_product_attention(
     Q:         torch.Tensor,
@@ -72,9 +59,6 @@ def scaled_dot_product_attention(
     return output, attn_w
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  MASK HELPERS
-# ══════════════════════════════════════════════════════════════════════
 
 def make_src_mask(src: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
     """(B, S) → (B, 1, 1, S) — True where src token is <pad>."""
@@ -96,9 +80,7 @@ def make_tgt_mask(tgt: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
     return pad_mask | causal_mask                                      # (B,1,T,T)
 
 
-# ══════════════════════════════════════════════════════════════════════
 #  MULTI-HEAD ATTENTION
-# ══════════════════════════════════════════════════════════════════════
 
 class MultiHeadAttention(nn.Module):
     def __init__(
@@ -124,7 +106,7 @@ class MultiHeadAttention(nn.Module):
         # Stored after each forward pass — used by ablations 2.2 and 2.3
         self.attn_weights: Optional[torch.Tensor] = None
 
-    # ── shape helpers ─────────────────────────────────────────────────
+    #  shape helpers ─
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         B, S, _ = x.size()
         return x.view(B, S, self.num_heads, self.d_k).transpose(1, 2)
@@ -152,12 +134,10 @@ class MultiHeadAttention(nn.Module):
         return self.W_o(self._merge_heads(attn_out))
 
 
-# ══════════════════════════════════════════════════════════════════════
 #  POSITIONAL ENCODINGS
-# ══════════════════════════════════════════════════════════════════════
 
 class PositionalEncoding(nn.Module):
-    """Sinusoidal positional encoding — "Attention Is All You Need" §3.5."""
+    """Sinusoidal positional encoding — "Attention Is All You Need""""
 
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
         super().__init__()
@@ -180,7 +160,7 @@ class PositionalEncoding(nn.Module):
 
 class LearnedPositionalEncoding(nn.Module):
     """
-    Learned positional encoding via nn.Embedding — ablation 2.4.
+    Learned positional encoding via nn.Embedding
     Replaces fixed sinusoidal PE with trainable position embeddings.
     """
 
@@ -197,12 +177,10 @@ class LearnedPositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-# ══════════════════════════════════════════════════════════════════════
 #  FEED-FORWARD NETWORK
-# ══════════════════════════════════════════════════════════════════════
 
 class PositionwiseFeedForward(nn.Module):
-    """FFN(x) = max(0, xW1 + b1)W2 + b2  — §3.3 of the paper."""
+    """FFN(x) = max(0, xW1 + b1)W2 + b2"""
 
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1) -> None:
         super().__init__()
@@ -214,17 +192,10 @@ class PositionwiseFeedForward(nn.Module):
         return self.linear2(self.dropout(F.relu(self.linear1(x))))
 
 
-# ══════════════════════════════════════════════════════════════════════
 #  ENCODER LAYER  (Pre-LayerNorm)
-# ══════════════════════════════════════════════════════════════════════
 
 class EncoderLayer(nn.Module):
-    """
-    Single encoder layer: Self-Attention → Add&Norm → FFN → Add&Norm.
-    Uses Pre-LayerNorm (normalise input before sub-layer), which gives
-    more stable training gradients than Post-LN (Xiong et al., 2020).
-    """
-
+    
     def __init__(
         self,
         d_model:   int,
@@ -251,9 +222,7 @@ class EncoderLayer(nn.Module):
         return x
 
 
-# ══════════════════════════════════════════════════════════════════════
 #  DECODER LAYER  (Pre-LayerNorm)
-# ══════════════════════════════════════════════════════════════════════
 
 class DecoderLayer(nn.Module):
     """
@@ -297,9 +266,7 @@ class DecoderLayer(nn.Module):
         return x
 
 
-# ══════════════════════════════════════════════════════════════════════
 #  ENCODER & DECODER STACKS
-# ══════════════════════════════════════════════════════════════════════
 
 class Encoder(nn.Module):
     def __init__(self, layer: EncoderLayer, N: int) -> None:
@@ -331,15 +298,12 @@ class Decoder(nn.Module):
         return self.norm(x)
 
 
-# ══════════════════════════════════════════════════════════════════════
 #  FULL TRANSFORMER
-# ══════════════════════════════════════════════════════════════════════
 
 class Transformer(nn.Module):
 
     # Update these after uploading your best checkpoint to GDrive
-    # _GDRIVE_FILE_ID  = "1YoVhZu0rhsKJHnLpj1Fyi3d7ckDDV0ev" # epoch 13 best 30.09
-    _GDRIVE_FILE_ID = "1Zik6ruNAmFbdxGy2OcyjW-n_5VDbuxq7"
+    _GDRIVE_FILE_ID  = "1YoVhZu0rhsKJHnLpj1Fyi3d7ckDDV0ev" # epoch 13 best 30.09
     _CHECKPOINT_NAME = "checkpoint_epoch17.pt"
 
     def __init__(
@@ -357,7 +321,7 @@ class Transformer(nn.Module):
     ) -> None:
         super().__init__()
 
-        # ── Inference mode: load from checkpoint ───────────────────────
+        #  Inference mode: load from checkpoint ─
         if checkpoint_path is None and src_vocab_size is None:
             ckpt = self._CHECKPOINT_NAME
             if not os.path.exists(ckpt):
@@ -389,11 +353,11 @@ class Transformer(nn.Module):
         self.pos_encoding   = pos_encoding
         self.use_scale      = use_scale
 
-        # ── Embeddings ─────────────────────────────────────────────────
+        #  Embeddings ─
         self.src_embed = nn.Embedding(src_vocab_size, d_model)
         self.tgt_embed = nn.Embedding(tgt_vocab_size, d_model)
 
-        # ── Positional encoding (ablation 2.4) ─────────────────────────
+        #  Positional encoding (ablation 2.4) ─
         def _make_pe():
             if pos_encoding == 'learned':
                 return LearnedPositionalEncoding(d_model, dropout)
@@ -402,7 +366,7 @@ class Transformer(nn.Module):
         self.src_pe = _make_pe()
         self.tgt_pe = _make_pe()
 
-        # ── Encoder / Decoder stacks ───────────────────────────────────
+        #  Encoder / Decoder stacks ─
         enc_layer    = EncoderLayer(d_model, num_heads, d_ff, dropout, use_scale)
         dec_layer    = DecoderLayer(d_model, num_heads, d_ff, dropout, use_scale)
         self.encoder = Encoder(enc_layer, N)
@@ -419,7 +383,7 @@ class Transformer(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    # ── Public API (autograder contract) ──────────────────────────────
+    #  Public API (autograder contract) 
     def encode(self, src: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
         x = self.src_pe(self.src_embed(src) * math.sqrt(self.d_model))
         return self.encoder(x, src_mask)
@@ -445,7 +409,7 @@ class Transformer(nn.Module):
         memory = self.encode(src, src_mask)
         return self.decode(memory, src_mask, tgt, tgt_mask)
 
-    # ── Inference helpers ──────────────────────────────────────────────
+    #  Inference helpers 
     def _load_vocabs(self):
         if hasattr(self, '_vocabs_loaded'):
             return

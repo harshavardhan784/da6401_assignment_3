@@ -14,23 +14,6 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
   │  save_checkpoint(model, optimizer, scheduler, epoch, path) → None   │
   │  load_checkpoint(path, model, optimizer, scheduler)        → int    │
   └─────────────────────────────────────────────────────────────────────┘
-
-CLI ABLATION FLAGS (Part 2):
-  --scheduler    {noam, fixed}          → ablation 2.1
-  --use_scale    {true, false}          → ablation 2.2  (√dk scaling)
-  --log_grad_norm                       → ablation 2.2  (Q/K grad norms)
-  --pos_encoding {sinusoidal, learned}  → ablation 2.4
-  --smoothing    float (0.0 or 0.1)    → ablation 2.5
-
-Fixes vs submitted version:
-  1. best_val_loss / best checkpoint saving re-enabled (was commented out).
-  2. Prediction confidence (softmax prob of correct token) logged per batch
-     — required for ablation 2.5.
-  3. Val BLEU now computed and logged every epoch (not only at end).
-  4. run_name derived from ablation flags when not provided.
-  5. wandb artifact block references ckpt_path properly.
-  6. save_checkpoint saves warmup_steps and full model_config.
-  7. Gradient norm of Q/K weights logged every step when --log_grad_norm set.
 """
 
 import os
@@ -46,9 +29,7 @@ from nltk.translate.bleu_score import corpus_bleu
 from model import Transformer, make_src_mask, make_tgt_mask
 
 
-# ══════════════════════════════════════════════════════════════════════
 #  LABEL SMOOTHING LOSS
-# ══════════════════════════════════════════════════════════════════════
 
 class LabelSmoothingLoss(nn.Module):
     """
@@ -94,9 +75,9 @@ class LabelSmoothingLoss(nn.Module):
         return loss.sum() / non_pad
 
 
-# ══════════════════════════════════════════════════════════════════════
+ 
 #  GRADIENT NORM HELPER  (ablation 2.2)
-# ══════════════════════════════════════════════════════════════════════
+
 
 def _log_qk_grad_norms(model: Transformer, step: int, wandb_run) -> None:
     """
@@ -127,9 +108,9 @@ def _log_qk_grad_norms(model: Transformer, step: int, wandb_run) -> None:
         })
 
 
-# ══════════════════════════════════════════════════════════════════════
+# 
 #  PREDICTION CONFIDENCE HELPER  (ablation 2.5)
-# ══════════════════════════════════════════════════════════════════════
+# 
 
 def _compute_prediction_confidence(
     logits: torch.Tensor,
@@ -156,9 +137,9 @@ def _compute_prediction_confidence(
         return gold_prob[mask].mean().item()
 
 
-# ══════════════════════════════════════════════════════════════════════
+# 
 #  ATTENTION HEATMAP HELPER  (ablation 2.3)
-# ══════════════════════════════════════════════════════════════════════
+# 
 
 def log_attention_heatmaps(
     model:     "Transformer",
@@ -230,9 +211,9 @@ def log_attention_heatmaps(
     print(f"  Logged {num_heads} attention heatmaps to W&B (step {step})")
 
 
-# ══════════════════════════════════════════════════════════════════════
+# 
 #  TRAINING LOOP
-# ══════════════════════════════════════════════════════════════════════
+# 
 
 def _compute_token_accuracy(
     logits: torch.Tensor,
@@ -306,7 +287,7 @@ def run_epoch(
 
             loss = loss_fn(flat_logits, flat_target)
 
-            # ── Prediction confidence (ablation 2.5) ──────────────────
+            #  Prediction confidence (ablation 2.5) 
             if log_confidence:
                 conf = _compute_prediction_confidence(
                     flat_logits.detach(), flat_target, pad_idx
@@ -344,9 +325,9 @@ def run_epoch(
     return avg_loss, avg_confidence, avg_accuracy, steps_taken
 
 
-# ══════════════════════════════════════════════════════════════════════
+# 
 #  GREEDY DECODING
-# ══════════════════════════════════════════════════════════════════════
+# 
 
 def greedy_decode(
     model:        Transformer,
@@ -384,9 +365,9 @@ def greedy_decode(
     return ys
 
 
-# ══════════════════════════════════════════════════════════════════════
+# 
 #  BLEU EVALUATION
-# ══════════════════════════════════════════════════════════════════════
+# 
 
 def evaluate_bleu(
     model:           Transformer,
@@ -444,9 +425,9 @@ def evaluate_bleu(
     return corpus_bleu(references, hypotheses) * 100.0
 
 
-# ══════════════════════════════════════════════════════════════════════
+
 #  CHECKPOINT UTILITIES
-# ══════════════════════════════════════════════════════════════════════
+ 
 
 def save_checkpoint(
     model:     Transformer,
@@ -504,21 +485,21 @@ def load_checkpoint(
     return epoch
 
 
-# ══════════════════════════════════════════════════════════════════════
+ 
 #  ARGUMENT PARSER
-# ══════════════════════════════════════════════════════════════════════
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train Transformer for DE→EN translation")
 
-    # ── Model ──────────────────────────────────────────────────────────
+    #  Model 
     p.add_argument("--d_model",    type=int,   default=256)
     p.add_argument("--N",          type=int,   default=8,   help="Number of encoder/decoder layers")
     p.add_argument("--num_heads",  type=int,   default=8)
     p.add_argument("--d_ff",       type=int,   default=512)
     p.add_argument("--dropout",    type=float, default=0.2)
 
-    # ── Training ───────────────────────────────────────────────────────
+    #  Training ─
     p.add_argument("--batch_size",   type=int,   default=128)
     p.add_argument("--num_epochs",   type=int,   default=35)
     p.add_argument("--warmup_steps", type=int,   default=4000)
@@ -528,7 +509,7 @@ def parse_args():
     p.add_argument("--val_bleu_freq", type=int,  default=5,
                    help="Compute val BLEU every N epochs (expensive; default: 5)")
 
-    # ── Part 2 ablation flags ──────────────────────────────────────────
+    #  Part 2 ablation flags 
     p.add_argument(
         "--scheduler",
         type=str, choices=["noam", "fixed"], default="noam",
@@ -561,7 +542,7 @@ def parse_args():
         help="2.5 — label smoothing ε (0.0 = standard cross-entropy)",
     )
 
-    # ── Misc ───────────────────────────────────────────────────────────
+    #  Misc ─
     p.add_argument("--run_name", type=str, default=None,
                    help="W&B run name (auto-generated from ablation flags if omitted)")
     p.add_argument("--ckpt_dir", type=str, default="checkpoints")
@@ -569,16 +550,16 @@ def parse_args():
     return p.parse_args()
 
 
-# ══════════════════════════════════════════════════════════════════════
+
 #  EXPERIMENT ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════
+
 
 def run_training_experiment(args) -> None:
     import wandb
     from dataset import Multi30kDataset, pad_idx
     from lr_scheduler import NoamScheduler, FixedLRScheduler
 
-    # ── Auto-generate run name ────────────────────────────────────────
+    #  Auto-generate run name 
     if args.run_name is None:
         args.run_name = (
             f"sched={args.scheduler}"
@@ -615,7 +596,7 @@ def run_training_experiment(args) -> None:
     wandb.config.update(config, allow_val_change=True)
     cfg = wandb.config
 
-    # ── Data ──────────────────────────────────────────────────────────
+    #  Data 
     train_ds = Multi30kDataset(split="train")
     train_loader, val_loader, test_loader = train_ds.get_dataloaders(
         batch_size  = cfg.batch_size,
@@ -625,7 +606,7 @@ def run_training_experiment(args) -> None:
     src_vocab = train_ds.src_vocab
     tgt_vocab = train_ds.tgt_vocab
 
-    # ── Model ─────────────────────────────────────────────────────────
+    #  Model ─
     model = Transformer(
         src_vocab_size = len(src_vocab),
         tgt_vocab_size = len(tgt_vocab),
@@ -638,7 +619,7 @@ def run_training_experiment(args) -> None:
         use_scale      = cfg.use_scale,
     ).to(device)
 
-    # ── Optimizer & Scheduler ─────────────────────────────────────────
+    #  Optimizer & Scheduler ─
     if cfg.scheduler == "noam":
         optimizer = torch.optim.Adam(
             model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9
@@ -652,7 +633,7 @@ def run_training_experiment(args) -> None:
         )
         scheduler = FixedLRScheduler(optimizer)
 
-    # ── Loss — ablation 2.5: smoothing=0.0 → standard CE ─────────────
+    #  Loss — ablation 2.5: smoothing=0.0 → standard CE ─
     loss_fn = LabelSmoothingLoss(
         vocab_size = len(tgt_vocab),
         pad_idx    = pad_idx,
@@ -668,7 +649,7 @@ def run_training_experiment(args) -> None:
     best_val_loss = float('inf')
     global_steps  = 0
 
-    # ── Training loop ─────────────────────────────────────────────────
+    #  Training loop ─
     for epoch in range(cfg.num_epochs):
 
         # Training
@@ -714,7 +695,7 @@ def run_training_experiment(args) -> None:
             "val_pred_confidence":   val_conf,
         }
 
-        # ── Ablation 2.3: attention heatmaps — log once every 5 epochs ─
+        #  Ablation 2.3: attention heatmaps — log once every 5 epochs ─
         if (epoch + 1) % 5 == 0 or epoch == 0:
             # Use the first sample from the validation set
             sample_src, _ = next(iter(val_loader))
@@ -726,7 +707,7 @@ def run_training_experiment(args) -> None:
                 step=global_steps,
             )
 
-        # ── Val BLEU every N epochs (expensive greedy decoding) ───────
+        #  Val BLEU every N epochs (expensive greedy decoding) ─
         if (epoch + 1) % cfg.val_bleu_freq == 0 or epoch == cfg.num_epochs - 1:
             val_bleu = evaluate_bleu(
                 model, val_loader, tgt_vocab, device=device, max_len=cfg.max_len
@@ -736,7 +717,7 @@ def run_training_experiment(args) -> None:
 
         wandb.log(log_dict)
 
-        # ── Save best checkpoint ───────────────────────────────────────
+        #  Save best checkpoint ─
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_ckpt_path = os.path.join(args.ckpt_dir, f"{args.run_name}_BEST.pt")
@@ -760,7 +741,7 @@ def run_training_experiment(args) -> None:
         artifact.add_file(ckpt_path)
         wandb.log_artifact(artifact)
 
-    # ── Final test BLEU ───────────────────────────────────────────────
+    #  Final test BLEU ─
     bleu = evaluate_bleu(
         model, test_loader, tgt_vocab, device=device, max_len=cfg.max_len
     )
@@ -769,9 +750,7 @@ def run_training_experiment(args) -> None:
     wandb.finish()
 
 
-# ══════════════════════════════════════════════════════════════════════
 #  MAIN
-# ══════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     args = parse_args()

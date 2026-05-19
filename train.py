@@ -518,7 +518,7 @@ def run_training_experiment(args) -> None:
 
     # ── Training loop ─────────────────────────────────────────────────
     global_steps = 0
-    best_val_loss = 100
+    # best_val_loss = float('inf')   
 
     for epoch in range(cfg.num_epochs):
         train_loss, steps = run_epoch(
@@ -535,10 +535,10 @@ def run_training_experiment(args) -> None:
             epoch_num=epoch, is_train=False, device=device,
         )
         
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            save_checkpoint(model, optimizer, scheduler, epoch,
-                            path=os.path.join(args.ckpt_dir, f"{args.run_name}_BEST.pt"))
+        # if val_loss < best_val_loss:
+            # best_val_loss = val_loss
+            # save_checkpoint(model, optimizer, scheduler, epoch,
+            #                 path=os.path.join(args.ckpt_dir, f"{args.run_name}_BEST.pt"))
 
 
         current_lr = optimizer.param_groups[0]["lr"]

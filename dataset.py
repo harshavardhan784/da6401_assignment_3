@@ -14,7 +14,6 @@ import spacy
 from datasets import load_dataset
 
 
-# ── Special token constants ───────────────────────────────────────────
 unk_token = "<unk>"
 pad_token = "<pad>"
 sos_token = "<sos>"
@@ -80,7 +79,6 @@ class Multi30kDataset(Dataset):
 
         self.src_data, self.tgt_data = self._process_data()
 
-    # ── Tokenisers ────────────────────────────────────────────────────
 
     def tokenize_de(self, text: str) -> list:
         return [tok.text.lower() for tok in self.spacy_de.tokenizer(text)]
@@ -88,7 +86,6 @@ class Multi30kDataset(Dataset):
     def tokenize_en(self, text: str) -> list:
         return [tok.text.lower() for tok in self.spacy_en.tokenizer(text)]
 
-    # ── Vocab builder ─────────────────────────────────────────────────
 
     def _build_vocab(self):
         src_counter = Counter()
@@ -108,7 +105,6 @@ class Multi30kDataset(Dataset):
 
         return _build(src_counter), _build(tgt_counter)
 
-    # ── Data processor ────────────────────────────────────────────────
 
     def _process_data(self):
         src_data, tgt_data = [], []
@@ -132,7 +128,6 @@ class Multi30kDataset(Dataset):
 
         return src_data, tgt_data
 
-    # ── Dataset interface ─────────────────────────────────────────────
 
     def __len__(self) -> int:
         return len(self.src_data)
@@ -143,9 +138,9 @@ class Multi30kDataset(Dataset):
             torch.tensor(self.tgt_data[idx], dtype=torch.long),
         )
 
-    # ── DataLoader factory (call only on the training split) ──────────
 
-    def get_dataloaders(self, batch_size: int = 128) -> tuple:
+    def get_dataloaders(self, batch_size: int = 128, num_workers: int = 0, pin_memory: bool = False) -> tuple:
+    
         """
         Build train / val / test DataLoaders.
         Must be called on the training-split instance so vocabularies
@@ -174,18 +169,21 @@ class Multi30kDataset(Dataset):
             batch_size=batch_size,
             shuffle=True,
             collate_fn=_collate,
+            num_workers=num_workers, pin_memory=pin_memory
         )
         val_loader = DataLoader(
             val_ds,
             batch_size=batch_size,
             shuffle=False,
             collate_fn=_collate,
+            num_workers=num_workers, pin_memory=pin_memory
         )
         test_loader = DataLoader(
             test_ds,
             batch_size=batch_size,
             shuffle=False,
             collate_fn=_collate,
+            num_workers=num_workers, pin_memory=pin_memory
         )
 
         return train_loader, val_loader, test_loader

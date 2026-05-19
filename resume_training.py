@@ -110,11 +110,11 @@ def build_dataloaders(src_stoi, tgt_stoi, batch_size):
     test_ds  = FastMulti30k("test",       src_stoi, tgt_stoi, spacy_de, spacy_en)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size,
-                              shuffle=True,  collate_fn=collate)
+                              shuffle=True,  collate_fn=collate, num_workers=4, pin_memory=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size,
-                              shuffle=False, collate_fn=collate)
+                              shuffle=False, collate_fn=collate, num_workers=4, pin_memory=True)
     test_loader  = DataLoader(test_ds,  batch_size=batch_size,
-                              shuffle=False, collate_fn=collate)
+                              shuffle=False, collate_fn=collate, num_workers=4, pin_memory=True)
 
     # Wrap stoi dicts as Vocab objects for evaluate_bleu compatibility
     src_vocab = Vocab(src_stoi)

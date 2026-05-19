@@ -13,9 +13,9 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import LRScheduler
 
 
-# ══════════════════════════════════════════════════════════════════════
+
 #  NOAM SCHEDULER  (ablation 2.1 baseline)
-# ══════════════════════════════════════════════════════════════════════
+
 
 class NoamScheduler(LRScheduler):
     """
@@ -64,9 +64,8 @@ class NoamScheduler(LRScheduler):
         return [base_lr * scale for base_lr in self.base_lrs]
 
 
-# ══════════════════════════════════════════════════════════════════════
+ 
 #  FIXED-LR SCHEDULER  (ablation 2.1 comparison)
-# ══════════════════════════════════════════════════════════════════════
 
 class FixedLRScheduler(LRScheduler):
     """
@@ -81,9 +80,9 @@ class FixedLRScheduler(LRScheduler):
         return list(self.base_lrs)
 
 
-# ══════════════════════════════════════════════════════════════════════
+
 #  UTILITY — simulate and return LR history
-# ══════════════════════════════════════════════════════════════════════
+
 
 def get_lr_history(
     d_model:      int,
@@ -106,10 +105,6 @@ def get_lr_history(
 
     return history
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  QUICK VISUALISATION
-# ══════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt

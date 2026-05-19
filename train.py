@@ -550,10 +550,16 @@ def run_training_experiment(args) -> None:
         ckpt_path = os.path.join(args.ckpt_dir, f"{args.run_name}_epoch{epoch}.pt")
         save_checkpoint(model, optimizer, scheduler, epoch, path=ckpt_path)
 
-        # Upload checkpoint as W&B artifact
+        safe_run_name = (
+            args.run_name
+            .replace("=", "_")
+            .replace("/", "_")
+            .replace(" ", "_")
+        )
+
         artifact = wandb.Artifact(
-            name=f"{args.run_name}-epoch-{epoch}",   # FIX: run_name now defined
-            type="model",
+            name=f"{safe_run_name}-epoch-{epoch}",
+            type="model"
         )
         artifact.add_file(ckpt_path)                  # FIX: ckpt_path now defined
         wandb.log_artifact(artifact)

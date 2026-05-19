@@ -532,6 +532,12 @@ def run_training_experiment(args) -> None:
             val_loader, model, loss_fn, None, None,
             epoch_num=epoch, is_train=False, device=device,
         )
+        
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            save_checkpoint(model, optimizer, scheduler, epoch,
+                            path=os.path.join(args.ckpt_dir, f"{args.run_name}_BEST.pt"))
+
 
         current_lr = optimizer.param_groups[0]["lr"]
         print(

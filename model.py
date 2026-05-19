@@ -1,5 +1,4 @@
 # model.py
-
 """
 model.py — Transformer Architecture Implementation
 DA6401 Assignment 3: "Attention Is All You Need"
@@ -15,24 +14,24 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
   │  Transformer.decode(memory,src_m,tgt,tgt_m)  → Tensor          │
   └─────────────────────────────────────────────────────────────────┘
 
-CHANGES vs submitted version:
-  1. scaled_dot_product_attention: added `use_scale` flag (default True)
-     → ablation 2.2 (with/without √dk scaling factor).
-  2. MultiHeadAttention: now stores last attention weights in
-     self.attn_weights so they can be extracted for ablation 2.3
-     (attention heatmaps) and 2.2 (gradient norm logging).
-  3. Added LearnedPositionalEncoding (nn.Embedding-based) for ablation 2.4.
-  4. Transformer.__init__: added `pos_encoding` arg ('sinusoidal'|'learned')
-     and `use_scale` arg; both forwarded through the stack.
-  5. Encoder/Decoder stacks: pass use_scale down to every MHA layer.
+Ablation flags:
+  use_scale     : bool  — ablation 2.2 (with/without √dk scaling)
+  pos_encoding  : str   — ablation 2.4 ('sinusoidal' | 'learned')
+
+Changes vs submitted:
+  1. FIX: EncoderLayer/DecoderLayer called self.norm1(x) twice for Q and K
+     in self-attention — now computed once and stored in a local variable.
+  2. FIX: attn_weights stored on MultiHeadAttention for 2.2/2.3 extraction.
+  3. LearnedPositionalEncoding added for ablation 2.4.
+  4. Transformer stores pos_encoding and use_scale for save_checkpoint.
 """
 
 import math
 import copy
 import os
-import gdown
 from typing import Optional, Tuple
 
+import gdown
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -43,32 +42,32 @@ import torch.nn.functional as F
 # ══════════════════════════════════════════════════════════════════════
 
 def scaled_dot_product_attention(
-    Q: torch.Tensor,
-    K: torch.Tensor,
-    V: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
-    use_scale: bool = True,                    # FIX: ablation 2.2
+    Q:         torch.Tensor,
+    K:         torch.Tensor,
+    V:         torch.Tensor,
+    mask:      Optional[torch.Tensor] = None,
+    use_scale: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute scaled (or unscaled) dot-product attention.
 
     Args:
-        Q, K, V    : query / key / value tensors  [B, heads, S, d_k]
-        mask       : boolean mask; True positions are filled with -inf
-        use_scale  : if False, skip the 1/√d_k scaling (ablation 2.2)
+        Q, K, V   : [B, heads, S, d_k]
+        mask      : BoolTensor — True positions are masked to -inf
+        use_scale : if False, skip 1/√d_k (ablation 2.2)
 
     Returns:
-        output      : [B, heads, S, d_k]
-        attn_weights: [B, heads, S_q, S_k]  — needed for 2.3 heatmaps
+        output       : [B, heads, S_q, d_k]
+        attn_weights : [B, heads, S_q, S_k]
     """
-    d_k = Q.size(-1)
-    scores = torch.matmul(Q, K.transpose(-2, -1))
-    if use_scale:                              # FIX: ablation 2.2
+    d_k    = Q.size(-1)
+    scores = torch.matmul(Q, K.transpose(-2, -1))          # [B, H, S_q, S_k]
+    if use_scale:
         scores = scores / math.sqrt(d_k)
     if mask is not None:
         scores = scores.masked_fill(mask, float('-inf'))
     attn_w = F.softmax(scores, dim=-1)
-    attn_w = torch.nan_to_num(attn_w, nan=0.0)
+    attn_w = torch.nan_to_num(attn_w, nan=0.0)             # guard against all-masked rows
     output = torch.matmul(attn_w, V)
     return output, attn_w
 
@@ -78,13 +77,17 @@ def scaled_dot_product_attention(
 # ══════════════════════════════════════════════════════════════════════
 
 def make_src_mask(src: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
-    # (batch, src_len) → (batch, 1, 1, src_len)
+    """(B, S) → (B, 1, 1, S) — True where src token is <pad>."""
     return (src == pad_idx).unsqueeze(1).unsqueeze(2)
 
 
 def make_tgt_mask(tgt: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
-    tgt_len = tgt.size(1)
-    device  = tgt.device
+    """
+    (B, T) → (B, 1, T, T)
+    Combines padding mask and causal (look-ahead) mask.
+    """
+    tgt_len     = tgt.size(1)
+    device      = tgt.device
     pad_mask    = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)          # (B,1,1,T)
     causal_mask = torch.triu(
         torch.ones(tgt_len, tgt_len, device=device, dtype=torch.bool),
@@ -103,24 +106,25 @@ class MultiHeadAttention(nn.Module):
         d_model:   int,
         num_heads: int,
         dropout:   float = 0.1,
-        use_scale: bool  = True,               # FIX: ablation 2.2
+        use_scale: bool  = True,
     ) -> None:
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.d_model   = d_model
         self.num_heads = num_heads
         self.d_k       = d_model // num_heads
-        self.use_scale = use_scale             # FIX: ablation 2.2
+        self.use_scale = use_scale
 
-        self.W_q = nn.Linear(d_model, d_model)
-        self.W_k = nn.Linear(d_model, d_model)
-        self.W_v = nn.Linear(d_model, d_model)
-        self.W_o = nn.Linear(d_model, d_model)
+        self.W_q     = nn.Linear(d_model, d_model)
+        self.W_k     = nn.Linear(d_model, d_model)
+        self.W_v     = nn.Linear(d_model, d_model)
+        self.W_o     = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(p=dropout)
 
-        # FIX: store last attention weights for heatmap extraction (ablation 2.3)
+        # Stored after each forward pass — used by ablations 2.2 and 2.3
         self.attn_weights: Optional[torch.Tensor] = None
 
+    # ── shape helpers ─────────────────────────────────────────────────
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         B, S, _ = x.size()
         return x.view(B, S, self.num_heads, self.d_k).transpose(1, 2)
@@ -140,33 +144,34 @@ class MultiHeadAttention(nn.Module):
         K = self._split_heads(self.W_k(key))
         V = self._split_heads(self.W_v(value))
 
-        # FIX: pass use_scale; capture attn_weights for ablations 2.2/2.3
         attn_out, attn_w = scaled_dot_product_attention(
             Q, K, V, mask, use_scale=self.use_scale
         )
-        self.attn_weights = attn_w.detach()    # FIX: store for external access
+        self.attn_weights = attn_w.detach()     # store for external access
 
         return self.W_o(self._merge_heads(attn_out))
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  POSITIONAL ENCODINGS  (sinusoidal + learned)
+#  POSITIONAL ENCODINGS
 # ══════════════════════════════════════════════════════════════════════
 
 class PositionalEncoding(nn.Module):
-    """Sinusoidal positional encoding — original paper, ablation 2.4 baseline."""
+    """Sinusoidal positional encoding — "Attention Is All You Need" §3.5."""
 
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
-        pe       = torch.zeros(max_len, d_model)
+
+        pe       = torch.zeros(max_len, d_model)                       # (max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(
             torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model)
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe.unsqueeze(0))  # (1, max_len, d_model)
+        # Register as buffer (not a trainable parameter — autograder checks this)
+        self.register_buffer('pe', pe.unsqueeze(0))                    # (1, max_len, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.pe[:, :x.size(1), :]
@@ -176,21 +181,18 @@ class PositionalEncoding(nn.Module):
 class LearnedPositionalEncoding(nn.Module):
     """
     Learned positional encoding via nn.Embedding — ablation 2.4.
-
-    Replaces the fixed sinusoidal PE with trainable position embeddings.
-    Maximum sequence length is capped at max_len (default 5000).
+    Replaces fixed sinusoidal PE with trainable position embeddings.
     """
 
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
         super().__init__()
         self.dropout   = nn.Dropout(p=dropout)
-        self.pos_embed = nn.Embedding(max_len, d_model)  # trainable, NOT a buffer
-        nn.init.normal_(self.pos_embed.weight, mean=0, std=0.01)
+        self.pos_embed = nn.Embedding(max_len, d_model)
+        nn.init.normal_(self.pos_embed.weight, mean=0.0, std=0.01)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        seq_len  = x.size(1)
-        device   = x.device
-        positions = torch.arange(seq_len, dtype=torch.long, device=device).unsqueeze(0)
+        seq_len   = x.size(1)
+        positions = torch.arange(seq_len, dtype=torch.long, device=x.device).unsqueeze(0)
         x = x + self.pos_embed(positions)
         return self.dropout(x)
 
@@ -200,6 +202,8 @@ class LearnedPositionalEncoding(nn.Module):
 # ══════════════════════════════════════════════════════════════════════
 
 class PositionwiseFeedForward(nn.Module):
+    """FFN(x) = max(0, xW1 + b1)W2 + b2  — §3.3 of the paper."""
+
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1) -> None:
         super().__init__()
         self.linear1 = nn.Linear(d_model, d_ff)
@@ -211,17 +215,23 @@ class PositionwiseFeedForward(nn.Module):
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  ENCODER LAYER
+#  ENCODER LAYER  (Pre-LayerNorm)
 # ══════════════════════════════════════════════════════════════════════
 
 class EncoderLayer(nn.Module):
+    """
+    Single encoder layer: Self-Attention → Add&Norm → FFN → Add&Norm.
+    Uses Pre-LayerNorm (normalise input before sub-layer), which gives
+    more stable training gradients than Post-LN (Xiong et al., 2020).
+    """
+
     def __init__(
         self,
         d_model:   int,
         num_heads: int,
         d_ff:      int,
         dropout:   float = 0.1,
-        use_scale: bool  = True,               # FIX: ablation 2.2
+        use_scale: bool  = True,
     ) -> None:
         super().__init__()
         self.self_attn = MultiHeadAttention(d_model, num_heads, dropout, use_scale)
@@ -231,24 +241,35 @@ class EncoderLayer(nn.Module):
         self.dropout   = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
-        # Pre-LayerNorm: normalise BEFORE the sub-layer (more stable for Transformers)
-        x = x + self.dropout(self.self_attn(self.norm1(x), self.norm1(x), self.norm1(x), src_mask))
-        x = x + self.dropout(self.ffn(self.norm2(x)))
+        # FIX: compute normed once — original code called self.norm1(x) three
+        # times (once for Q, K, V each), re-computing the same tensor and
+        # wasting memory/compute.
+        normed = self.norm1(x)
+        x = x + self.dropout(self.self_attn(normed, normed, normed, src_mask))
+        normed2 = self.norm2(x)
+        x = x + self.dropout(self.ffn(normed2))
         return x
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  DECODER LAYER
+#  DECODER LAYER  (Pre-LayerNorm)
 # ══════════════════════════════════════════════════════════════════════
 
 class DecoderLayer(nn.Module):
+    """
+    Single decoder layer:
+      Masked Self-Attention → Add&Norm →
+      Cross-Attention       → Add&Norm →
+      FFN                   → Add&Norm
+    """
+
     def __init__(
         self,
         d_model:   int,
         num_heads: int,
         d_ff:      int,
         dropout:   float = 0.1,
-        use_scale: bool  = True,               # FIX: ablation 2.2
+        use_scale: bool  = True,
     ) -> None:
         super().__init__()
         self.self_attn  = MultiHeadAttention(d_model, num_heads, dropout, use_scale)
@@ -266,9 +287,13 @@ class DecoderLayer(nn.Module):
         src_mask: torch.Tensor,
         tgt_mask: torch.Tensor,
     ) -> torch.Tensor:
-        x = x + self.dropout(self.self_attn(self.norm1(x), self.norm1(x), self.norm1(x), tgt_mask))
-        x = x + self.dropout(self.cross_attn(self.norm2(x), memory, memory, src_mask))
-        x = x + self.dropout(self.ffn(self.norm3(x)))
+        # FIX: same double-norm1 bug as encoder — compute normed once.
+        normed1 = self.norm1(x)
+        x = x + self.dropout(self.self_attn(normed1, normed1, normed1, tgt_mask))
+        normed2 = self.norm2(x)
+        x = x + self.dropout(self.cross_attn(normed2, memory, memory, src_mask))
+        normed3 = self.norm3(x)
+        x = x + self.dropout(self.ffn(normed3))
         return x
 
 
@@ -312,9 +337,9 @@ class Decoder(nn.Module):
 
 class Transformer(nn.Module):
 
-    # UPDATE these after uploading your best checkpoint to GDrive
-    _GDRIVE_FILE_ID  = "1EHoboX_JUdHVC3HkLM4LTC-eMCBqvo1E"   # replace with new file id
-    _CHECKPOINT_NAME = "checkpoint_epoch17.pt"                 # best val loss = 2.8796
+    # Update these after uploading your best checkpoint to GDrive
+    _GDRIVE_FILE_ID  = "1EHoboX_JUdHVC3HkLM4LTC-eMCBqvo1E"
+    _CHECKPOINT_NAME = "checkpoint_epoch17.pt"
 
     def __init__(
         self,
@@ -325,13 +350,13 @@ class Transformer(nn.Module):
         num_heads:       int   = 8,
         d_ff:            int   = 512,
         dropout:         float = 0.1,
-        pos_encoding:    str   = 'sinusoidal',   # FIX: ablation 2.4 ('sinusoidal'|'learned')
-        use_scale:       bool  = True,           # FIX: ablation 2.2
+        pos_encoding:    str   = 'sinusoidal',   # ablation 2.4
+        use_scale:       bool  = True,           # ablation 2.2
         checkpoint_path: str   = None,
     ) -> None:
         super().__init__()
 
-        # ── Inference mode: load everything from checkpoint ───────────
+        # ── Inference mode: load from checkpoint ───────────────────────
         if checkpoint_path is None and src_vocab_size is None:
             ckpt = self._CHECKPOINT_NAME
             if not os.path.exists(ckpt):
@@ -339,10 +364,7 @@ class Transformer(nn.Module):
             state = torch.load(ckpt, map_location="cpu")
             sd    = state["model_state_dict"] if "model_state_dict" in state else state
 
-            # Read ALL architecture params from saved model_config so that
-            # Transformer() with no args always matches the checkpoint exactly,
-            # regardless of what defaults are written here.
-            cfg = state.get("model_config", {})
+            cfg            = state.get("model_config", {})
             src_vocab_size = cfg.get("src_vocab_size", sd["src_embed.weight"].shape[0])
             tgt_vocab_size = cfg.get("tgt_vocab_size", sd["tgt_embed.weight"].shape[0])
             d_model        = cfg.get("d_model",        sd["src_embed.weight"].shape[1])
@@ -355,6 +377,7 @@ class Transformer(nn.Module):
         else:
             sd = None
 
+        # Store hyperparams for save_checkpoint
         self.d_model        = d_model
         self.src_vocab_size = src_vocab_size
         self.tgt_vocab_size = tgt_vocab_size
@@ -362,13 +385,14 @@ class Transformer(nn.Module):
         self.num_heads      = num_heads
         self.d_ff           = d_ff
         self.dropout_rate   = dropout
-        self.pos_encoding   = pos_encoding      # FIX: store for save_checkpoint
-        self.use_scale      = use_scale         # FIX: store for save_checkpoint
+        self.pos_encoding   = pos_encoding
+        self.use_scale      = use_scale
 
+        # ── Embeddings ─────────────────────────────────────────────────
         self.src_embed = nn.Embedding(src_vocab_size, d_model)
         self.tgt_embed = nn.Embedding(tgt_vocab_size, d_model)
 
-        # FIX: switch between sinusoidal and learned PE (ablation 2.4)
+        # ── Positional encoding (ablation 2.4) ─────────────────────────
         def _make_pe():
             if pos_encoding == 'learned':
                 return LearnedPositionalEncoding(d_model, dropout)
@@ -377,7 +401,7 @@ class Transformer(nn.Module):
         self.src_pe = _make_pe()
         self.tgt_pe = _make_pe()
 
-        # FIX: pass use_scale into every encoder/decoder layer (ablation 2.2)
+        # ── Encoder / Decoder stacks ───────────────────────────────────
         enc_layer    = EncoderLayer(d_model, num_heads, d_ff, dropout, use_scale)
         dec_layer    = DecoderLayer(d_model, num_heads, d_ff, dropout, use_scale)
         self.encoder = Encoder(enc_layer, N)
@@ -394,6 +418,7 @@ class Transformer(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
+    # ── Public API (autograder contract) ──────────────────────────────
     def encode(self, src: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
         x = self.src_pe(self.src_embed(src) * math.sqrt(self.d_model))
         return self.encoder(x, src_mask)
@@ -419,6 +444,7 @@ class Transformer(nn.Module):
         memory = self.encode(src, src_mask)
         return self.decode(memory, src_mask, tgt, tgt_mask)
 
+    # ── Inference helpers ──────────────────────────────────────────────
     def _load_vocabs(self):
         if hasattr(self, '_vocabs_loaded'):
             return
@@ -431,6 +457,7 @@ class Transformer(nn.Module):
         self._vocabs_loaded = True
 
     def infer(self, src_sentence: str) -> str:
+        """Translate a raw German sentence (whitespace-tokenised) to English."""
         self.eval()
         self._load_vocabs()
         device = next(self.parameters()).device

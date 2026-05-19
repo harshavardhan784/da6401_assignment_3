@@ -14,6 +14,7 @@ import spacy
 from datasets import load_dataset
 
 
+# ── Special tokens & their fixed indices ─────────────────────────────
 unk_token = "<unk>"
 pad_token = "<pad>"
 sos_token = "<sos>"
@@ -27,8 +28,12 @@ eos_idx = 3
 specials = [unk_token, pad_token, sos_token, eos_token]
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  VOCABULARY
+# ══════════════════════════════════════════════════════════════════════
+
 class Vocab:
-    """Simple vocabulary: token ↔ index."""
+    """Simple token ↔ index vocabulary."""
 
     def __init__(self, stoi: dict):
         self.stoi = stoi
@@ -43,6 +48,10 @@ class Vocab:
     def lookup_index(self, token: str) -> int:
         return self.stoi.get(token, unk_idx)
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  DATASET
+# ══════════════════════════════════════════════════════════════════════
 
 class Multi30kDataset(Dataset):
     """
@@ -79,14 +88,14 @@ class Multi30kDataset(Dataset):
 
         self.src_data, self.tgt_data = self._process_data()
 
-
+    # ── Tokenisers ────────────────────────────────────────────────────
     def tokenize_de(self, text: str) -> list:
         return [tok.text.lower() for tok in self.spacy_de.tokenizer(text)]
 
     def tokenize_en(self, text: str) -> list:
         return [tok.text.lower() for tok in self.spacy_en.tokenizer(text)]
 
-
+    # ── Vocabulary construction ───────────────────────────────────────
     def _build_vocab(self):
         src_counter = Counter()
         tgt_counter = Counter()
@@ -96,7 +105,6 @@ class Multi30kDataset(Dataset):
             tgt_counter.update(self.tokenize_en(example["en"]))
 
         def _build(counter: Counter) -> Vocab:
-            # Only keep tokens with freq >= min_freq; specials always included
             filtered = [tok for tok, cnt in counter.items() if cnt >= self.min_freq]
             stoi = {tok: idx + len(specials) for idx, tok in enumerate(filtered)}
             for idx, tok in enumerate(specials):
@@ -105,7 +113,7 @@ class Multi30kDataset(Dataset):
 
         return _build(src_counter), _build(tgt_counter)
 
-
+    # ── Numericise data ───────────────────────────────────────────────
     def _process_data(self):
         src_data, tgt_data = [], []
 
@@ -128,7 +136,7 @@ class Multi30kDataset(Dataset):
 
         return src_data, tgt_data
 
-
+    # ── Dataset protocol ──────────────────────────────────────────────
     def __len__(self) -> int:
         return len(self.src_data)
 
@@ -138,13 +146,20 @@ class Multi30kDataset(Dataset):
             torch.tensor(self.tgt_data[idx], dtype=torch.long),
         )
 
-
-    def get_dataloaders(self, batch_size: int = 128, num_workers: int = 0, pin_memory: bool = False) -> tuple:
-    
+    # ── DataLoader factory (call on training split only) ──────────────
+    def get_dataloaders(
+        self,
+        batch_size:  int  = 128,
+        num_workers: int  = 0,
+        pin_memory:  bool = False,
+    ) -> tuple:
         """
         Build train / val / test DataLoaders.
         Must be called on the training-split instance so vocabularies
-        are constructed from training data only.
+        are constructed from training data only (no data leakage).
+
+        Returns:
+            (train_loader, val_loader, test_loader)
         """
         assert self.split == "train", (
             "get_dataloaders() must be called on the training split instance "
@@ -152,43 +167,47 @@ class Multi30kDataset(Dataset):
         )
 
         val_ds = Multi30kDataset(
-            split="validation",
-            src_vocab=self.src_vocab,
-            tgt_vocab=self.tgt_vocab,
+            split     = "validation",
+            src_vocab = self.src_vocab,
+            tgt_vocab = self.tgt_vocab,
         )
         test_ds = Multi30kDataset(
-            split="test",
-            src_vocab=self.src_vocab,
-            tgt_vocab=self.tgt_vocab,
+            split     = "test",
+            src_vocab = self.src_vocab,
+            tgt_vocab = self.tgt_vocab,
         )
 
         _collate = partial(_collate_fn, pad_idx=pad_idx)
 
         train_loader = DataLoader(
             self,
-            batch_size=batch_size,
-            shuffle=True,
-            collate_fn=_collate,
-            num_workers=num_workers, pin_memory=pin_memory
+            batch_size  = batch_size,
+            shuffle     = True,
+            collate_fn  = _collate,
+            num_workers = num_workers,
+            pin_memory  = pin_memory,
         )
         val_loader = DataLoader(
             val_ds,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=_collate,
-            num_workers=num_workers, pin_memory=pin_memory
+            batch_size  = batch_size,
+            shuffle     = False,
+            collate_fn  = _collate,
+            num_workers = num_workers,
+            pin_memory  = pin_memory,
         )
         test_loader = DataLoader(
             test_ds,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=_collate,
-            num_workers=num_workers, pin_memory=pin_memory
+            batch_size  = batch_size,
+            shuffle     = False,
+            collate_fn  = _collate,
+            num_workers = num_workers,
+            pin_memory  = pin_memory,
         )
 
         return train_loader, val_loader, test_loader
 
 
+# ── Collate: pad to longest sequence in batch ─────────────────────────
 def _collate_fn(batch, pad_idx):
     src_batch, tgt_batch = zip(*batch)
     src_batch = pad_sequence(src_batch, batch_first=True, padding_value=pad_idx)

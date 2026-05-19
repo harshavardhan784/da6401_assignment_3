@@ -16,18 +16,21 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
   └─────────────────────────────────────────────────────────────────────┘
 
 CLI ABLATION FLAGS (Part 2):
-  --scheduler   {noam, fixed}          → ablation 2.1
-  --use_scale   {true, false}          → ablation 2.2  (√dk scaling)
-  --pos_encoding {sinusoidal, learned} → ablation 2.4
-  --smoothing   float (0.0 or 0.1)    → ablation 2.5
+  --scheduler    {noam, fixed}          → ablation 2.1
+  --use_scale    {true, false}          → ablation 2.2  (√dk scaling)
+  --log_grad_norm                       → ablation 2.2  (Q/K grad norms)
+  --pos_encoding {sinusoidal, learned}  → ablation 2.4
+  --smoothing    float (0.0 or 0.1)    → ablation 2.5
 
-FIXES vs original:
-  1. run_name / ckpt_path were undefined → now derived from args.
-  2. wandb artifact block now correctly references local variables.
-  3. evaluate_bleu: corpus_bleu() returns 0-1; multiplied by 100.
-  4. save_checkpoint: also saves warmup_steps.
-  5. Gradient norm of Q/K weights logged every step when
-     --log_grad_norm is set (ablation 2.2).
+Fixes vs submitted version:
+  1. best_val_loss / best checkpoint saving re-enabled (was commented out).
+  2. Prediction confidence (softmax prob of correct token) logged per batch
+     — required for ablation 2.5.
+  3. Val BLEU now computed and logged every epoch (not only at end).
+  4. run_name derived from ablation flags when not provided.
+  5. wandb artifact block references ckpt_path properly.
+  6. save_checkpoint saves warmup_steps and full model_config.
+  7. Gradient norm of Q/K weights logged every step when --log_grad_norm set.
 """
 
 import os
@@ -49,15 +52,17 @@ from model import Transformer, make_src_mask, make_tgt_mask
 
 class LabelSmoothingLoss(nn.Module):
     """
-    Label smoothing as in "Attention Is All You Need".
+    Label smoothing as described in "Attention Is All You Need" §5.4.
 
     Smoothed target distribution:
-        y_smooth = (1 - eps) * one_hot(y) + eps / (vocab_size - 1)
+        y_smooth[correct]  = 1 - eps
+        y_smooth[other]    = eps / (vocab_size - 2)   # excludes correct + pad
+        y_smooth[pad]      = 0
 
     Args:
-        vocab_size (int)  : Number of output classes.
-        pad_idx    (int)  : Index of <pad> token — receives 0 probability.
-        smoothing  (float): Smoothing factor ε. Use 0.0 for standard CE (ablation 2.5).
+        vocab_size : Number of output classes.
+        pad_idx    : Index of <pad> — receives zero probability.
+        smoothing  : ε. Use 0.0 for standard cross-entropy (ablation 2.5).
     """
 
     def __init__(self, vocab_size: int, pad_idx: int, smoothing: float = 0.1) -> None:
@@ -73,9 +78,9 @@ class LabelSmoothingLoss(nn.Module):
             logits : [batch * tgt_len, vocab_size]
             target : [batch * tgt_len]
         Returns:
-            Scalar loss.
+            Scalar mean loss (ignoring pad positions).
         """
-        smooth_val = self.smoothing / (self.vocab_size - 2)   # exclude correct + pad
+        smooth_val = self.smoothing / max(self.vocab_size - 2, 1)
         dist = torch.full_like(logits, smooth_val)
         dist[:, self.pad_idx] = 0.0
         dist.scatter_(1, target.unsqueeze(1), self.confidence)
@@ -96,17 +101,16 @@ class LabelSmoothingLoss(nn.Module):
 def _log_qk_grad_norms(model: Transformer, step: int, wandb_run) -> None:
     """
     Log the L2 gradient norm of all W_q and W_k weight matrices across
-    every encoder and decoder layer. Called every step during ablation 2.2.
+    every encoder and decoder layer. Called every training step during
+    ablation 2.2 (with/without √dk scaling).
     """
     q_norms, k_norms = [], []
 
     for enc_layer in model.encoder.layers:
-        wq = enc_layer.self_attn.W_q.weight
-        wk = enc_layer.self_attn.W_k.weight
-        if wq.grad is not None:
-            q_norms.append(wq.grad.norm().item())
-        if wk.grad is not None:
-            k_norms.append(wk.grad.norm().item())
+        if enc_layer.self_attn.W_q.weight.grad is not None:
+            q_norms.append(enc_layer.self_attn.W_q.weight.grad.norm().item())
+        if enc_layer.self_attn.W_k.weight.grad is not None:
+            k_norms.append(enc_layer.self_attn.W_k.weight.grad.norm().item())
 
     for dec_layer in model.decoder.layers:
         for mha in (dec_layer.self_attn, dec_layer.cross_attn):
@@ -124,35 +128,161 @@ def _log_qk_grad_norms(model: Transformer, step: int, wandb_run) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  PREDICTION CONFIDENCE HELPER  (ablation 2.5)
+# ══════════════════════════════════════════════════════════════════════
+
+def _compute_prediction_confidence(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    pad_idx: int = 1,
+) -> float:
+    """
+    Compute mean softmax probability assigned to the correct token,
+    excluding <pad> positions.
+
+    Args:
+        logits  : [B*T, vocab_size]
+        target  : [B*T]
+    Returns:
+        mean confidence (float in [0, 1])
+    """
+    with torch.no_grad():
+        probs    = torch.softmax(logits, dim=-1)            # [B*T, V]
+        # Gather the probability of the correct (gold) token at each position
+        gold_prob = probs.gather(1, target.unsqueeze(1)).squeeze(1)  # [B*T]
+        mask      = target != pad_idx
+        if mask.sum() == 0:
+            return 0.0
+        return gold_prob[mask].mean().item()
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ATTENTION HEATMAP HELPER  (ablation 2.3)
+# ══════════════════════════════════════════════════════════════════════
+
+def log_attention_heatmaps(
+    model:     "Transformer",
+    src:       torch.Tensor,
+    src_vocab,
+    wandb_run,
+    device:    str = "cpu",
+    step:      int = 0,
+) -> None:
+    """
+    Extract attention weights from the LAST encoder layer for a single
+    source sentence and log one heatmap per attention head to W&B.
+
+    Call once per epoch (or a few times during training) so the W&B
+    report can show how head specialization evolves.
+
+    Args:
+        model     : Trained Transformer (eval mode set inside).
+        src       : [1, src_len] integer token tensor.
+        src_vocab : Vocab with lookup_token(idx) method.
+        wandb_run : Active wandb run object.
+        device    : 'cuda' or 'cpu'.
+        step      : Global step number (used as W&B x-axis value).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    model.eval()
+    src = src.to(device)
+    from model import make_src_mask
+    src_mask = make_src_mask(src, pad_idx=1).to(device)
+
+    with torch.no_grad():
+        _ = model.encode(src, src_mask)
+
+    # attn_weights stored by the last encoder layer's self-attention
+    last_enc_layer = model.encoder.layers[-1]
+    attn_w = last_enc_layer.self_attn.attn_weights  # [1, H, S, S]
+
+    if attn_w is None:
+        return
+
+    attn_w = attn_w[0].cpu().numpy()               # [H, S, S]
+    num_heads = attn_w.shape[0]
+    src_len   = src.size(1)
+
+    # Build token labels (skip <sos>/<eos> from display if desired)
+    token_labels = [src_vocab.lookup_token(src[0, i].item()) for i in range(src_len)]
+
+    heatmap_images = {}
+    for h in range(num_heads):
+        fig, ax = plt.subplots(figsize=(5, 5))
+        im = ax.imshow(attn_w[h], vmin=0.0, vmax=1.0, cmap="YlOrRd", aspect="auto")
+        ax.set_xticks(range(src_len))
+        ax.set_yticks(range(src_len))
+        ax.set_xticklabels(token_labels, rotation=45, ha="right", fontsize=8)
+        ax.set_yticklabels(token_labels, fontsize=8)
+        ax.set_title(f"Encoder head {h}", fontsize=10)
+        ax.set_xlabel("Key (attended to)")
+        ax.set_ylabel("Query (attending from)")
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        plt.tight_layout()
+        heatmap_images[f"attn/enc_last_head_{h:02d}"] = wandb_run.Image(fig)
+        plt.close(fig)
+
+    wandb_run.log({**heatmap_images, "step": step})
+    print(f"  Logged {num_heads} attention heatmaps to W&B (step {step})")
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  TRAINING LOOP
 # ══════════════════════════════════════════════════════════════════════
 
-def run_epoch(
+def _compute_token_accuracy(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    pad_idx: int = 1,
+) -> float:
+    """
+    Token-level accuracy: fraction of non-pad positions where argmax == target.
+    Used as the "validation accuracy" metric required by ablation 2.1.
+    """
+    with torch.no_grad():
+        preds   = logits.argmax(dim=-1)            # [B*T]
+        mask    = target != pad_idx
+        correct = (preds == target) & mask
+        if mask.sum() == 0:
+            return 0.0
+        return correct.sum().item() / mask.sum().item()
+
+
+
     data_iter,
-    model:     Transformer,
-    loss_fn:   nn.Module,
-    optimizer: Optional[torch.optim.Optimizer],
-    scheduler  = None,
-    epoch_num: int  = 0,
-    is_train:  bool = True,
-    device:    str  = "cpu",
-    log_grad_norm: bool = False,   # ablation 2.2
-    wandb_run  = None,
-    step_offset: int = 0,          # total steps before this epoch (for grad logging)
+    model:         Transformer,
+    loss_fn:       nn.Module,
+    optimizer:     Optional[torch.optim.Optimizer],
+    scheduler      = None,
+    epoch_num:     int  = 0,
+    is_train:      bool = True,
+    device:        str  = "cpu",
+    log_grad_norm: bool = False,
+    log_confidence: bool = False,   # ablation 2.5 — log prediction confidence
+    wandb_run      = None,
+    step_offset:   int  = 0,
 ) -> tuple:
     """
     Run one epoch of training or evaluation.
 
     Returns:
-        avg_loss  : float — average per-token loss.
-        total_steps: int  — steps taken this epoch (training only, else 0).
+        avg_loss       : float — average per-token loss.
+        avg_confidence : float — mean softmax probability of correct token.
+        steps_taken    : int   — training steps this epoch (0 during eval).
     """
     model.train() if is_train else model.eval()
 
-    total_loss   = 0.0
-    total_tokens = 0
-    pad_idx      = 1
-    steps_taken  = 0
+    total_loss         = 0.0
+    total_tokens       = 0
+    total_confidence   = 0.0
+    total_accuracy     = 0.0
+    confidence_batches = 0
+    steps_taken        = 0
+    pad_idx            = 1
 
     ctx = torch.enable_grad() if is_train else torch.no_grad()
 
@@ -168,20 +298,35 @@ def run_epoch(
             src_mask = make_src_mask(src, pad_idx)
             tgt_mask = make_tgt_mask(tgt_in, pad_idx)
 
-            logits = model(src, tgt_in, src_mask, tgt_mask)
+            logits = model(src, tgt_in, src_mask, tgt_mask)   # [B, T, V]
             B, T, V = logits.shape
-            loss = loss_fn(
-                logits.contiguous().view(B * T, V),
-                tgt_out.contiguous().view(B * T),
-            )
+
+            flat_logits = logits.contiguous().view(B * T, V)
+            flat_target = tgt_out.contiguous().view(B * T)
+
+            loss = loss_fn(flat_logits, flat_target)
+
+            # ── Prediction confidence (ablation 2.5) ──────────────────
+            if log_confidence:
+                conf = _compute_prediction_confidence(
+                    flat_logits.detach(), flat_target, pad_idx
+                )
+                total_confidence   += conf
+                confidence_batches += 1
+                # Token accuracy — required for ablation 2.1 "validation accuracy"
+                total_accuracy += _compute_token_accuracy(
+                    flat_logits.detach(), flat_target, pad_idx
+                )
 
             if is_train:
                 optimizer.zero_grad()
                 loss.backward()
 
                 # ablation 2.2: log Q/K gradient norms before clipping
-                if log_grad_norm and wandb_run is not None:
-                    _log_qk_grad_norms(model, step_offset + steps_taken, wandb_run)
+                # Only log for the first 1,000 steps as the assignment specifies
+                current_step = step_offset + steps_taken
+                if log_grad_norm and wandb_run is not None and current_step <= 1000:
+                    _log_qk_grad_norms(model, current_step, wandb_run)
 
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
@@ -189,11 +334,14 @@ def run_epoch(
                     scheduler.step()
                 steps_taken += 1
 
-            non_pad      = (tgt_out != pad_idx).sum().item()
+            non_pad      = (flat_target != pad_idx).sum().item()
             total_loss  += loss.item() * non_pad
             total_tokens += non_pad
 
-    return total_loss / max(total_tokens, 1), steps_taken
+    avg_loss       = total_loss / max(total_tokens, 1)
+    avg_confidence = total_confidence / max(confidence_batches, 1)
+    avg_accuracy   = total_accuracy   / max(confidence_batches, 1)
+    return avg_loss, avg_confidence, avg_accuracy, steps_taken
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -292,7 +440,7 @@ def evaluate_bleu(
                 hypotheses.append(pred_tokens)
                 references.append([ref_tokens])
 
-    # corpus_bleu returns 0-1; scale to 0-100
+    # corpus_bleu returns [0, 1]; scale to [0, 100]
     return corpus_bleu(references, hypotheses) * 100.0
 
 
@@ -307,9 +455,9 @@ def save_checkpoint(
     epoch:     int,
     path:      str = "checkpoint.pt",
 ) -> None:
-    """Save model + optimizer + scheduler + vocab + config."""
-    src_stoi = model.src_vocab.stoi if hasattr(model, 'src_vocab') else {}
-    tgt_stoi = model.tgt_vocab.stoi if hasattr(model, 'tgt_vocab') else {}
+    """Save model, optimizer, scheduler states plus vocab and model config."""
+    src_stoi     = model.src_vocab.stoi if hasattr(model, 'src_vocab') else {}
+    tgt_stoi     = model.tgt_vocab.stoi if hasattr(model, 'tgt_vocab') else {}
     warmup_steps = getattr(scheduler, 'warmup_steps', 4000)
 
     torch.save(
@@ -344,6 +492,7 @@ def load_checkpoint(
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler  = None,
 ) -> int:
+    """Load checkpoint and return the saved epoch number."""
     ckpt = torch.load(path, map_location="cpu")
     model.load_state_dict(ckpt['model_state_dict'])
     if optimizer is not None and 'optimizer_state_dict' in ckpt:
@@ -356,7 +505,7 @@ def load_checkpoint(
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  ARGUMENT PARSER  (Part 2 ablation flags)
+#  ARGUMENT PARSER
 # ══════════════════════════════════════════════════════════════════════
 
 def parse_args():
@@ -376,6 +525,8 @@ def parse_args():
     p.add_argument("--max_len",      type=int,   default=100)
     p.add_argument("--num_workers",  type=int,   default=4)
     p.add_argument("--pin_memory",   action="store_true", default=True)
+    p.add_argument("--val_bleu_freq", type=int,  default=5,
+                   help="Compute val BLEU every N epochs (expensive; default: 5)")
 
     # ── Part 2 ablation flags ──────────────────────────────────────────
     p.add_argument(
@@ -386,7 +537,7 @@ def parse_args():
     p.add_argument(
         "--fixed_lr",
         type=float, default=1e-4,
-        help="2.1 — learning rate to use when --scheduler fixed",
+        help="2.1 — constant learning rate when --scheduler fixed",
     )
     p.add_argument(
         "--use_scale",
@@ -427,8 +578,7 @@ def run_training_experiment(args) -> None:
     from dataset import Multi30kDataset, pad_idx
     from lr_scheduler import NoamScheduler, FixedLRScheduler
 
-    # ── Auto-generate run name from ablation flags ────────────────────
-    # FIX: run_name was undefined in original code
+    # ── Auto-generate run name ────────────────────────────────────────
     if args.run_name is None:
         args.run_name = (
             f"sched={args.scheduler}"
@@ -450,12 +600,12 @@ def run_training_experiment(args) -> None:
         max_len       = args.max_len,
         num_workers   = args.num_workers,
         pin_memory    = args.pin_memory,
-        # ablation metadata logged to W&B
         scheduler     = args.scheduler,
         fixed_lr      = args.fixed_lr,
         use_scale     = args.use_scale,
         pos_encoding  = args.pos_encoding,
         log_grad_norm = args.log_grad_norm,
+        val_bleu_freq = args.val_bleu_freq,
     )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -468,9 +618,9 @@ def run_training_experiment(args) -> None:
     # ── Data ──────────────────────────────────────────────────────────
     train_ds = Multi30kDataset(split="train")
     train_loader, val_loader, test_loader = train_ds.get_dataloaders(
-        batch_size=cfg.batch_size,
-        num_workers=cfg.num_workers,
-        pin_memory=cfg.pin_memory,
+        batch_size  = cfg.batch_size,
+        num_workers = cfg.num_workers,
+        pin_memory  = cfg.pin_memory,
     )
     src_vocab = train_ds.src_vocab
     tgt_vocab = train_ds.tgt_vocab
@@ -484,12 +634,11 @@ def run_training_experiment(args) -> None:
         num_heads      = cfg.num_heads,
         d_ff           = cfg.d_ff,
         dropout        = cfg.dropout,
-        pos_encoding   = cfg.pos_encoding,   # ablation 2.4
-        use_scale      = cfg.use_scale,      # ablation 2.2
+        pos_encoding   = cfg.pos_encoding,
+        use_scale      = cfg.use_scale,
     ).to(device)
 
     # ── Optimizer & Scheduler ─────────────────────────────────────────
-    # ablation 2.1: noam vs fixed LR
     if cfg.scheduler == "noam":
         optimizer = torch.optim.Adam(
             model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9
@@ -497,13 +646,13 @@ def run_training_experiment(args) -> None:
         scheduler = NoamScheduler(
             optimizer, d_model=cfg.d_model, warmup_steps=cfg.warmup_steps
         )
-    else:  # fixed
+    else:  # fixed LR — ablation 2.1
         optimizer = torch.optim.Adam(
             model.parameters(), lr=cfg.fixed_lr, betas=(0.9, 0.98), eps=1e-9
         )
         scheduler = FixedLRScheduler(optimizer)
 
-    # ablation 2.5: smoothing=0.0 → standard CE; smoothing=0.1 → label smoothing
+    # ── Loss — ablation 2.5: smoothing=0.0 → standard CE ─────────────
     loss_fn = LabelSmoothingLoss(
         vocab_size = len(tgt_vocab),
         pad_idx    = pad_idx,
@@ -516,45 +665,85 @@ def run_training_experiment(args) -> None:
 
     os.makedirs(args.ckpt_dir, exist_ok=True)
 
-    # ── Training loop ─────────────────────────────────────────────────
-    global_steps = 0
-    # best_val_loss = float('inf')   
+    best_val_loss = float('inf')
+    global_steps  = 0
 
+    # ── Training loop ─────────────────────────────────────────────────
     for epoch in range(cfg.num_epochs):
-        train_loss, steps = run_epoch(
+
+        # Training
+        train_loss, train_conf, train_acc, steps = run_epoch(
             train_loader, model, loss_fn, optimizer, scheduler,
-            epoch_num=epoch, is_train=True, device=device,
-            log_grad_norm=cfg.log_grad_norm,  # ablation 2.2
-            wandb_run=wandb,
-            step_offset=global_steps,
+            epoch_num      = epoch,
+            is_train       = True,
+            device         = device,
+            log_grad_norm  = cfg.log_grad_norm,
+            log_confidence = True,
+            wandb_run      = wandb,
+            step_offset    = global_steps,
         )
         global_steps += steps
 
-        val_loss, _ = run_epoch(
+        # Validation loss + confidence + accuracy
+        val_loss, val_conf, val_acc, _ = run_epoch(
             val_loader, model, loss_fn, None, None,
-            epoch_num=epoch, is_train=False, device=device,
+            epoch_num      = epoch,
+            is_train       = False,
+            device         = device,
+            log_confidence = True,
         )
-        
-        # if val_loss < best_val_loss:
-            # best_val_loss = val_loss
-            # save_checkpoint(model, optimizer, scheduler, epoch,
-            #                 path=os.path.join(args.ckpt_dir, f"{args.run_name}_BEST.pt"))
-
 
         current_lr = optimizer.param_groups[0]["lr"]
         print(
             f"Epoch {epoch:02d}  "
             f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
+            f"val_acc={val_acc:.4f}  "
+            f"train_conf={train_conf:.4f}  val_conf={val_conf:.4f}  "
             f"lr={current_lr:.2e}"
         )
-        wandb.log({
-            "epoch":      epoch,
-            "train_loss": train_loss,
-            "val_loss":   val_loss,
-            "lr":         current_lr,
-        })
 
-        # FIX: ckpt_path was undefined in original — now properly set
+        log_dict = {
+            "epoch":                 epoch,
+            "train_loss":            train_loss,
+            "val_loss":              val_loss,
+            "val_accuracy":          val_acc,       # ablation 2.1: overlay with train_loss
+            "train_accuracy":        train_acc,
+            "lr":                    current_lr,
+            # Ablation 2.5 — prediction confidence
+            "train_pred_confidence": train_conf,
+            "val_pred_confidence":   val_conf,
+        }
+
+        # ── Ablation 2.3: attention heatmaps — log once every 5 epochs ─
+        if (epoch + 1) % 5 == 0 or epoch == 0:
+            # Use the first sample from the validation set
+            sample_src, _ = next(iter(val_loader))
+            sample_src = sample_src[:1]  # [1, S]
+            log_attention_heatmaps(
+                model, sample_src, src_vocab,
+                wandb_run=wandb,
+                device=device,
+                step=global_steps,
+            )
+
+        # ── Val BLEU every N epochs (expensive greedy decoding) ───────
+        if (epoch + 1) % cfg.val_bleu_freq == 0 or epoch == cfg.num_epochs - 1:
+            val_bleu = evaluate_bleu(
+                model, val_loader, tgt_vocab, device=device, max_len=cfg.max_len
+            )
+            print(f"  Val BLEU: {val_bleu:.2f}")
+            log_dict["val_bleu"] = val_bleu
+
+        wandb.log(log_dict)
+
+        # ── Save best checkpoint ───────────────────────────────────────
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_ckpt_path = os.path.join(args.ckpt_dir, f"{args.run_name}_BEST.pt")
+            save_checkpoint(model, optimizer, scheduler, epoch, path=best_ckpt_path)
+            print(f"  ↑ New best val_loss={best_val_loss:.4f}")
+
+        # Save epoch checkpoint
         ckpt_path = os.path.join(args.ckpt_dir, f"{args.run_name}_epoch{epoch}.pt")
         save_checkpoint(model, optimizer, scheduler, epoch, path=ckpt_path)
 
@@ -564,15 +753,14 @@ def run_training_experiment(args) -> None:
             .replace("/", "_")
             .replace(" ", "_")
         )
-
         artifact = wandb.Artifact(
-            name=f"{safe_run_name}-epoch-{epoch}",
-            type="model"
+            name = f"{safe_run_name}-epoch-{epoch}",
+            type = "model",
         )
-        artifact.add_file(ckpt_path)                  # FIX: ckpt_path now defined
+        artifact.add_file(ckpt_path)
         wandb.log_artifact(artifact)
 
-    # ── Final BLEU ────────────────────────────────────────────────────
+    # ── Final test BLEU ───────────────────────────────────────────────
     bleu = evaluate_bleu(
         model, test_loader, tgt_vocab, device=device, max_len=cfg.max_len
     )

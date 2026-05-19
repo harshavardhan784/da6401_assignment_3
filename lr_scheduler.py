@@ -13,20 +13,29 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import LRScheduler
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  NOAM SCHEDULER  (ablation 2.1 baseline)
+# ══════════════════════════════════════════════════════════════════════
+
 class NoamScheduler(LRScheduler):
     """
-    Noam learning rate scheduler as described in "Attention Is All You Need".
+    Noam learning rate schedule from "Attention Is All You Need".
 
     Linear warm-up for `warmup_steps` steps, then inverse-square-root decay.
 
     Formula:
         lrate = d_model^(-0.5) * min(step^(-0.5), step * warmup_steps^(-1.5))
 
+    Usage:
+        optimizer = Adam(model.parameters(), lr=1.0, ...)
+        scheduler = NoamScheduler(optimizer, d_model=256, warmup_steps=4000)
+        # After each batch: optimizer.step(); scheduler.step()
+
     Args:
-        optimizer    : Wrapped optimizer (set lr=1.0 so base_lr acts as scale 1).
+        optimizer    : Wrapped optimizer. Set lr=1.0 so base_lr scales as 1.
         d_model      : Model dimensionality (embedding size).
-        warmup_steps : Number of warm-up steps before decay begins.
-        last_epoch   : The index of the last epoch. Default: -1.
+        warmup_steps : Steps before decay begins.
+        last_epoch   : Index of last epoch (default: -1).
     """
 
     def __init__(
@@ -55,13 +64,13 @@ class NoamScheduler(LRScheduler):
         return [base_lr * scale for base_lr in self.base_lrs]
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Fixed-LR "scheduler" — used in Part-2 ablation 2.1
-# ──────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+#  FIXED-LR SCHEDULER  (ablation 2.1 comparison)
+# ══════════════════════════════════════════════════════════════════════
 
 class FixedLRScheduler(LRScheduler):
     """
-    No-op scheduler: keeps the optimizer's learning rate constant.
+    No-op scheduler: keeps the optimizer's learning rate exactly constant.
     Used in the Noam vs Fixed-LR ablation (Part 2.1).
     """
 
@@ -72,9 +81,9 @@ class FixedLRScheduler(LRScheduler):
         return list(self.base_lrs)
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Helper utilities
-# ──────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+#  UTILITY — simulate and return LR history
+# ══════════════════════════════════════════════════════════════════════
 
 def get_lr_history(
     d_model:      int,
@@ -83,7 +92,7 @@ def get_lr_history(
 ) -> list:
     """
     Simulate the Noam schedule for `total_steps` steps and return the
-    per-step learning rate history.
+    per-step learning rate as a list.
     """
     dummy_model = torch.nn.Linear(1, 1)
     optimizer   = optim.Adam(dummy_model.parameters(), lr=1.0)
@@ -97,6 +106,10 @@ def get_lr_history(
 
     return history
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  QUICK VISUALISATION
+# ══════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt

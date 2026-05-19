@@ -338,7 +338,7 @@ class Decoder(nn.Module):
 class Transformer(nn.Module):
 
     # Update these after uploading your best checkpoint to GDrive
-    _GDRIVE_FILE_ID  = "1EHoboX_JUdHVC3HkLM4LTC-eMCBqvo1E"
+    _GDRIVE_FILE_ID  = "1YoVhZu0rhsKJHnLpj1Fyi3d7ckDDV0ev"
     _CHECKPOINT_NAME = "checkpoint_epoch17.pt"
 
     def __init__(

@@ -137,7 +137,7 @@ class MultiHeadAttention(nn.Module):
 #  POSITIONAL ENCODINGS
 
 class PositionalEncoding(nn.Module):
-    """Sinusoidal positional encoding — "Attention Is All You Need""""
+    """Sinusoidal positional encoding — "Attention Is All You Need"""
 
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
         super().__init__()

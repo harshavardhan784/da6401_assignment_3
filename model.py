@@ -312,8 +312,9 @@ class Decoder(nn.Module):
 
 class Transformer(nn.Module):
 
-    _GDRIVE_FILE_ID  = "1tH6Zdc5RagEq62MSIU9RiBYC_5kq3DP9"
-    _CHECKPOINT_NAME = "checkpoint_epoch9.pt"
+    # UPDATE these after uploading your best checkpoint to GDrive
+    _GDRIVE_FILE_ID  = "1EHoboX_JUdHVC3HkLM4LTC-eMCBqvo1E"   # replace with new file id
+    _CHECKPOINT_NAME = "checkpoint_epoch17.pt"                 # best val loss = 2.8796
 
     def __init__(
         self,
@@ -336,10 +337,21 @@ class Transformer(nn.Module):
             if not os.path.exists(ckpt):
                 gdown.download(id=self._GDRIVE_FILE_ID, output=ckpt, quiet=False)
             state = torch.load(ckpt, map_location="cpu")
-            sd = state["model_state_dict"] if "model_state_dict" in state else state
-            src_vocab_size = sd["src_embed.weight"].shape[0]
-            tgt_vocab_size = sd["tgt_embed.weight"].shape[0]
-            d_model        = sd["src_embed.weight"].shape[1]
+            sd    = state["model_state_dict"] if "model_state_dict" in state else state
+
+            # Read ALL architecture params from saved model_config so that
+            # Transformer() with no args always matches the checkpoint exactly,
+            # regardless of what defaults are written here.
+            cfg = state.get("model_config", {})
+            src_vocab_size = cfg.get("src_vocab_size", sd["src_embed.weight"].shape[0])
+            tgt_vocab_size = cfg.get("tgt_vocab_size", sd["tgt_embed.weight"].shape[0])
+            d_model        = cfg.get("d_model",        sd["src_embed.weight"].shape[1])
+            N              = cfg.get("N",              N)
+            num_heads      = cfg.get("num_heads",      num_heads)
+            d_ff           = cfg.get("d_ff",           d_ff)
+            dropout        = cfg.get("dropout",        dropout)
+            pos_encoding   = cfg.get("pos_encoding",   pos_encoding)
+            use_scale      = cfg.get("use_scale",      use_scale)
         else:
             sd = None
 

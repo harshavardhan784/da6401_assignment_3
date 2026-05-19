@@ -313,8 +313,7 @@ class Decoder(nn.Module):
 class Transformer(nn.Module):
 
     # UPDATE these after uploading your best checkpoint to GDrive
-    # _GDRIVE_FILE_ID  = "1EHoboX_JUdHVC3HkLM4LTC-eMCBqvo1E"   # replace with new file id
-    _GDRIVE_FILE_ID = "146bVVVHhmsNOcqkIHIzExw3Ju_n_oBif"
+    _GDRIVE_FILE_ID  = "1EHoboX_JUdHVC3HkLM4LTC-eMCBqvo1E"   # replace with new file id
     _CHECKPOINT_NAME = "checkpoint_epoch17.pt"                 # best val loss = 2.8796
 
     def __init__(

@@ -518,7 +518,7 @@ def run_training_experiment(args) -> None:
 
     # ── Training loop ─────────────────────────────────────────────────
     global_steps = 0
-    best_val_loss = float('inf')   
+    best_val_loss = 100
 
     for epoch in range(cfg.num_epochs):
         train_loss, steps = run_epoch(

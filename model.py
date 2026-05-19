@@ -312,7 +312,7 @@ class Decoder(nn.Module):
 
 class Transformer(nn.Module):
 
-    _GDRIVE_FILE_ID  = "1wgXqR9iswP3YjCecU_PCVR6_gbpcwk2g"
+    _GDRIVE_FILE_ID  = "1tH6Zdc5RagEq62MSIU9RiBYC_5kq3DP9"
     _CHECKPOINT_NAME = "checkpoint_epoch9.pt"
 
     def __init__(

@@ -252,7 +252,7 @@ def _compute_token_accuracy(
         return correct.sum().item() / mask.sum().item()
 
 
-
+def run_epoch(
     data_iter,
     model:         Transformer,
     loss_fn:       nn.Module,

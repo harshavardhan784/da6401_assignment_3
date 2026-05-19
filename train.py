@@ -462,6 +462,7 @@ def run_training_experiment(args) -> None:
     print(f"Device: {device}  |  Run: {args.run_name}")
 
     wandb.init(project="da6401-a3", name=args.run_name, config=config)
+    wandb.config.update(config, allow_val_change=True)
     cfg = wandb.config
 
     # ── Data ──────────────────────────────────────────────────────────
@@ -517,6 +518,7 @@ def run_training_experiment(args) -> None:
 
     # ── Training loop ─────────────────────────────────────────────────
     global_steps = 0
+    best_val_loss = float('inf')   
 
     for epoch in range(cfg.num_epochs):
         train_loss, steps = run_epoch(
